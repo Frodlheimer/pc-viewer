@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "generate:demo-tiles": "node scripts/generate-demo-tiles.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,42 +1,130 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.app-toolbar {
+  background: rgba(16, 22, 27, 0.92);
+  border-bottom: 1px solid rgba(148, 178, 196, 0.2);
+  backdrop-filter: blur(6px);
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.app-sidebar {
+  width: 280px;
+  background: rgba(13, 17, 20, 0.9);
+  border-right: 1px solid rgba(148, 178, 196, 0.18);
+  overflow: auto;
+}
+
+.app-viewer {
+  flex: 1;
+  position: relative;
+  background: #0b0f12;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  color: #d8e2ea;
+}
+
+.toolbar-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.toolbar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #b7c5cf;
+}
+
+.sidebar {
+  padding: 18px 16px;
+  color: #c6d3dc;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sidebar-section {
+  background: rgba(19, 25, 29, 0.7);
+  border: 1px solid rgba(124, 161, 182, 0.16);
+  border-radius: 12px;
+  padding: 12px 12px 14px;
+  box-shadow: 0 12px 30px rgba(4, 8, 10, 0.2);
+}
+
+.sidebar-title {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7fa4bc;
+  margin-bottom: 10px;
+}
+
+.sidebar select {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 155, 174, 0.3);
+  background: rgba(10, 13, 15, 0.8);
+  color: #dbe6ed;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.sidebar-meta {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #c0cdd6;
+}
+
+.sidebar-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #ff9b91;
+}
+
+.viewer-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.viewer-tooltip {
+  position: absolute;
+  z-index: 4;
+  background: rgba(9, 12, 15, 0.92);
+  color: #e2edf4;
+  border: 1px solid rgba(140, 177, 196, 0.28);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  pointer-events: none;
+  box-shadow: 0 12px 30px rgba(4, 8, 10, 0.35);
+}
+
+@media (max-width: 900px) {
+  .app-body {
+    flex-direction: column;
   }
-  to {
-    transform: rotate(360deg);
+
+  .app-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid rgba(148, 178, 196, 0.2);
   }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
-}
-
-.card {
-  padding: 2em;
-}
-
-.read-the-docs {
-  color: #888;
 }
