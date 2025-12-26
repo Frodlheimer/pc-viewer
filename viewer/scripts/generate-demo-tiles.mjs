@@ -75,8 +75,17 @@ await mkdir(tilesDir, { recursive: true });
 await writeFile(path.join(tilesDir, `${tileId}.pct`), Buffer.from(buffer));
 
 const manifest = {
+  schemaVersion: 0.2,
   id: "demo",
   name: "Demo Dataset",
+  crs: {},
+  units: "meters",
+  attributes: [
+    { name: "position", type: "float32", components: 3, role: "position" },
+    { name: "rgb", type: "uint8", components: 3, role: "color" },
+  ],
+  roles: { position: "position", color: "rgb" },
+  boundsQuantization: { origin: [0, 0, 0], scale: [1, 1, 1] },
   levels: [
     {
       id: "L0",

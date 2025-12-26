@@ -1,14 +1,59 @@
+import type { Vec3 } from "./Point";
 import type { Bounds } from "./Tile";
 
 export type TileFormat = "pct1" | "pct2";
 
+export type DatasetCrs = {
+  epsg?: number;
+  wkt?: string;
+};
+
+export type AttributeRole =
+  | "position"
+  | "color"
+  | "intensity"
+  | "classification"
+  | "custom";
+
+export type DatasetAttribute = {
+  name: string;
+  type: string;
+  components: number;
+  role?: AttributeRole;
+};
+
+export type DatasetRoles = {
+  position: string;
+  color?: string;
+};
+
+export type BoundsQuantization = {
+  origin: Vec3;
+  scale: Vec3;
+};
+
+export type TileUrlRef = {
+  url: string;
+  containerUrl?: never;
+  byteOffset?: never;
+  byteLength?: never;
+};
+
+export type TileContainerRef = {
+  url?: never;
+  containerUrl: string;
+  byteOffset: number;
+  byteLength: number;
+};
+
+export type TileRef = TileUrlRef | TileContainerRef;
+
 export type TileManifest = {
   id: string;
-  url: string;
   bounds: Bounds;
   pointCount: number;
   format?: TileFormat;
-};
+} & TileRef;
 
 export type LevelManifest = {
   id: string;
@@ -16,8 +61,14 @@ export type LevelManifest = {
 };
 
 export type DatasetManifest = {
+  schemaVersion: number;
   id: string;
   name: string;
+  crs: DatasetCrs;
+  units: string;
+  attributes: DatasetAttribute[];
+  roles: DatasetRoles;
+  boundsQuantization: BoundsQuantization;
   levels: LevelManifest[];
   bounds: Bounds;
 };

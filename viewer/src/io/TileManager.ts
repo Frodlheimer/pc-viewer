@@ -1,8 +1,18 @@
-import type { DatasetManifest, TileManifest } from "../types/Dataset";
-import type { Bounds, RenderData, TileBounds, TileRenderData } from "../types/Tile";
+import type {
+  DatasetManifest,
+  DatasetRoles,
+  TileManifest,
+} from "../types/Dataset";
+import type {
+  Bounds,
+  RenderData,
+  TileBounds,
+  TileRenderData,
+} from "../types/Tile";
 import { getBoundsCenter } from "../utils/bounds";
 import { loadTile } from "./TileLoader";
 import { loadPct2Tile } from "./Pct2TileLoader";
+import type { TypedArray } from "../types/Pct2";
 
 const toTileBounds = (bounds: Bounds): TileBounds => {
   const [minX, minY, minZ, maxX, maxY, maxZ] = bounds;
@@ -12,13 +22,24 @@ const toTileBounds = (bounds: Bounds): TileBounds => {
   };
 };
 
+const getTileUrl = (tile: TileManifest): string => {
+  if (tile.url) {
+    return tile.url;
+  }
+  if (tile.containerUrl) {
+    throw new Error("Tile container references are not supported yet.");
+  }
+  throw new Error("Tile reference missing url.");
+};
+
 const isPct2Tile = (tile: TileManifest) =>
-  tile.format === "pct2" || tile.url.toLowerCase().endsWith(".pct2");
+  tile.format === "pct2" ||
+  (tile.url ? tile.url.toLowerCase().endsWith(".pct2") : false);
 
 const loadPct1RenderData = async (
   tile: TileManifest
 ): Promise<TileRenderData> => {
-  const data = await loadTile(tile.url);
+  const data = await loadTile(getTileUrl(tile));
   return {
     id: tile.id,
     pointCount: data.pointCount,
@@ -29,21 +50,25 @@ const loadPct1RenderData = async (
 };
 
 const loadPct2RenderData = async (
-  tile: TileManifest
+  tile: TileManifest,
+  roles: DatasetRoles
 ): Promise<TileRenderData> => {
-  const parsed = await loadPct2Tile(tile.url);
-  const positions = parsed.attributes.position;
-  if (!positions || !(positions instanceof Float32Array)) {
-    throw new Error("PCT2 tile missing position attribute.");
+  const parsed = await loadPct2Tile(getTileUrl(tile));
+  const positionName = roles.position;
+  const rawPosition = parsed.attributes[positionName];
+  if (!rawPosition) {
+    throw new Error(`PCT2 tile missing position attribute (${positionName}).`);
   }
 
   const expectedPositions = parsed.pointCount * 3;
-  if (positions.length < expectedPositions) {
-    throw new Error("PCT2 position attribute truncated.");
-  }
+  const positions = decodePositions(rawPosition, expectedPositions, parsed.scale);
 
-  const rgbAttribute = parsed.attributes.rgb;
-  const colors = rgbAttribute instanceof Uint8Array ? rgbAttribute : undefined;
+  const colorName = roles.color ?? "rgb";
+  const rawColor = parsed.attributes[colorName];
+  if (roles.color && !rawColor) {
+    throw new Error(`PCT2 tile missing color attribute (${colorName}).`);
+  }
+  const colors = rawColor instanceof Uint8Array ? rawColor : undefined;
   if (colors && colors.length < parsed.pointCount * 3) {
     throw new Error("PCT2 rgb attribute truncated.");
   }
@@ -59,6 +84,35 @@ const loadPct2RenderData = async (
   };
 };
 
+const decodePositions = (
+  attribute: TypedArray,
+  expectedLength: number,
+  scale: [number, number, number]
+): Float32Array => {
+  if (attribute instanceof Float32Array) {
+    if (attribute.length < expectedLength) {
+      throw new Error("PCT2 position attribute truncated.");
+    }
+    return attribute;
+  }
+
+  if (!(attribute instanceof Int32Array)) {
+    throw new Error("PCT2 position attribute must be int32x3.");
+  }
+
+  if (attribute.length < expectedLength) {
+    throw new Error("PCT2 position attribute truncated.");
+  }
+
+  const decoded = new Float32Array(expectedLength);
+  for (let i = 0; i < expectedLength; i += 3) {
+    decoded[i] = attribute[i] * scale[0];
+    decoded[i + 1] = attribute[i + 1] * scale[1];
+    decoded[i + 2] = attribute[i + 2] * scale[2];
+  }
+  return decoded;
+};
+
 export const loadRenderData = async (
   manifest: DatasetManifest
 ): Promise<RenderData> => {
@@ -69,7 +123,9 @@ export const loadRenderData = async (
 
   const tiles = await Promise.all(
     level.tiles.map((tile) =>
-      isPct2Tile(tile) ? loadPct2RenderData(tile) : loadPct1RenderData(tile)
+      isPct2Tile(tile)
+        ? loadPct2RenderData(tile, manifest.roles)
+        : loadPct1RenderData(tile)
     )
   );
 
