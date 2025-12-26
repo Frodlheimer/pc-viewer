@@ -39,6 +39,7 @@ export type LoadStatus = "idle" | "loading" | "ready" | "error";
 
 export type AppState = {
   viewState: ViewState;
+  viewStateDatasetId: string | null;
   hover: HoverInfo | null;
   selection: SelectionInfo | null;
   activeDatasetId: string;
@@ -50,13 +51,13 @@ export type AppState = {
 
 type AppAction =
   | { type: "set-view-state"; viewState: ViewState }
+  | { type: "initialize-view-state"; datasetId: string; bounds: Bounds }
   | { type: "set-hover"; hover: HoverInfo | null }
   | { type: "set-selection"; selection: SelectionInfo | null }
   | { type: "set-active-dataset"; datasetId: string }
   | { type: "set-render-data"; renderData: RenderData | null }
   | { type: "set-status"; status: LoadStatus; error?: string | null }
-  | { type: "set-show-point-cloud"; value: boolean }
-  | { type: "reset-view-state"; bounds: Bounds };
+  | { type: "set-show-point-cloud"; value: boolean };
 
 const initialState: AppState = {
   viewState: {
@@ -65,6 +66,7 @@ const initialState: AppState = {
     rotationX: 30,
     rotationOrbit: 30,
   },
+  viewStateDatasetId: null,
   hover: null,
   selection: null,
   activeDatasetId: "demo",
@@ -78,6 +80,22 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
   switch (action.type) {
     case "set-view-state":
       return { ...state, viewState: action.viewState };
+    case "initialize-view-state": {
+      if (state.viewStateDatasetId === action.datasetId) {
+        return state;
+      }
+      const target = getBoundsCenter(action.bounds);
+      return {
+        ...state,
+        viewStateDatasetId: action.datasetId,
+        viewState: {
+          target,
+          zoom: 0,
+          rotationX: 30,
+          rotationOrbit: 30,
+        },
+      };
+    }
     case "set-hover":
       return { ...state, hover: action.hover };
     case "set-selection":
@@ -90,18 +108,6 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
       return { ...state, status: action.status, error: action.error ?? null };
     case "set-show-point-cloud":
       return { ...state, showPointCloud: action.value };
-    case "reset-view-state": {
-      const target = getBoundsCenter(action.bounds);
-      return {
-        ...state,
-        viewState: {
-          target,
-          zoom: 0,
-          rotationX: 30,
-          rotationOrbit: 30,
-        },
-      };
-    }
     default:
       return state;
   }

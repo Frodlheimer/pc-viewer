@@ -9,9 +9,12 @@ const tilesDir = path.join(datasetDir, "tiles");
 
 const tileId = "0_0_0";
 const pointCount = 50_000;
+const quantizationOrigin = [0, 0, 0];
+const quantizationScale = [0.001, 0.001, 0.001];
 
 const positions = new Float32Array(pointCount * 3);
 const colors = new Uint8Array(pointCount * 3);
+const positionsInt32 = new Int32Array(pointCount * 3);
 
 let minX = Infinity;
 let minY = Infinity;
@@ -34,6 +37,15 @@ for (let i = 0; i < pointCount; i += 1) {
   positions[offset] = x;
   positions[offset + 1] = y;
   positions[offset + 2] = z;
+  positionsInt32[offset] = Math.round(
+    (x - quantizationOrigin[0]) / quantizationScale[0]
+  );
+  positionsInt32[offset + 1] = Math.round(
+    (y - quantizationOrigin[1]) / quantizationScale[1]
+  );
+  positionsInt32[offset + 2] = Math.round(
+    (z - quantizationOrigin[2]) / quantizationScale[2]
+  );
 
   minX = Math.min(minX, x);
   minY = Math.min(minY, y);
@@ -52,6 +64,18 @@ for (let i = 0; i < pointCount; i += 1) {
 }
 
 const bounds = [minX, minY, minZ, maxX, maxY, maxZ];
+const quantizedBounds = {
+  min: [
+    Math.round((minX - quantizationOrigin[0]) / quantizationScale[0]),
+    Math.round((minY - quantizationOrigin[1]) / quantizationScale[1]),
+    Math.round((minZ - quantizationOrigin[2]) / quantizationScale[2]),
+  ],
+  max: [
+    Math.round((maxX - quantizationOrigin[0]) / quantizationScale[0]),
+    Math.round((maxY - quantizationOrigin[1]) / quantizationScale[1]),
+    Math.round((maxZ - quantizationOrigin[2]) / quantizationScale[2]),
+  ],
+};
 
 const headerSize = 16;
 const buffer = new ArrayBuffer(
@@ -74,6 +98,145 @@ new Uint8Array(buffer, headerSize + positions.byteLength, colors.length).set(
 await mkdir(tilesDir, { recursive: true });
 await writeFile(path.join(tilesDir, `${tileId}.pct`), Buffer.from(buffer));
 
+const align = (value, alignment) =>
+  Math.ceil(value / alignment) * alignment;
+
+const createPct2Buffer = () => {
+  const encoder = new TextEncoder();
+  const attributes = [
+    {
+      name: "position",
+      type: 5,
+      components: 3,
+      normalized: 0,
+      data: positionsInt32,
+    },
+    {
+      name: "rgb",
+      type: 2,
+      components: 3,
+      normalized: 1,
+      data: colors,
+    },
+  ];
+
+  const entries = attributes.map((attr) => {
+    const nameBytes = encoder.encode(attr.name);
+    const entryBytes = 17 + nameBytes.length;
+    return { ...attr, nameBytes, entryBytes };
+  });
+
+  const rawHeaderBytes = 76 + entries.reduce((sum, entry) => sum + entry.entryBytes, 0);
+  const headerBytes = align(rawHeaderBytes, 4);
+
+  let payloadOffset = 0;
+  const payloadLayout = entries.map((entry) => {
+    const byteOffset = payloadOffset;
+    payloadOffset += entry.data.byteLength;
+    return { ...entry, byteOffset, byteLength: entry.data.byteLength };
+  });
+
+  const buffer = new ArrayBuffer(headerBytes + payloadOffset);
+  const view = new DataView(buffer);
+  view.setUint8(0, "P".charCodeAt(0));
+  view.setUint8(1, "C".charCodeAt(0));
+  view.setUint8(2, "T".charCodeAt(0));
+  view.setUint8(3, "2".charCodeAt(0));
+  view.setUint16(4, 1, true);
+  view.setUint16(6, headerBytes, true);
+  view.setBigUint64(8, 1n, true);
+  view.setUint32(16, pointCount, true);
+  view.setUint32(20, 0, true);
+  view.setFloat64(24, quantizationOrigin[0], true);
+  view.setFloat64(32, quantizationOrigin[1], true);
+  view.setFloat64(40, quantizationOrigin[2], true);
+  view.setFloat64(48, quantizationScale[0], true);
+  view.setFloat64(56, quantizationScale[1], true);
+  view.setFloat64(64, quantizationScale[2], true);
+  view.setUint16(72, payloadLayout.length, true);
+  view.setUint16(74, 0, true);
+
+  let cursor = 76;
+  payloadLayout.forEach((entry) => {
+    view.setUint8(cursor, entry.nameBytes.length);
+    cursor += 1;
+    new Uint8Array(buffer, cursor, entry.nameBytes.length).set(entry.nameBytes);
+    cursor += entry.nameBytes.length;
+    view.setUint8(cursor, entry.type);
+    cursor += 1;
+    view.setUint8(cursor, entry.components);
+    cursor += 1;
+    view.setUint8(cursor, 0);
+    cursor += 1;
+    view.setUint8(cursor, entry.normalized);
+    cursor += 1;
+    view.setUint32(cursor, entry.byteOffset, true);
+    cursor += 4;
+    view.setUint32(cursor, entry.byteLength, true);
+    cursor += 4;
+    view.setUint32(cursor, 0, true);
+    cursor += 4;
+  });
+
+  const payloadStart = headerBytes;
+  payloadLayout.forEach((entry) => {
+    const targetOffset = payloadStart + entry.byteOffset;
+    if (entry.data instanceof Int32Array) {
+      new Int32Array(buffer, targetOffset, entry.data.length).set(entry.data);
+    } else if (entry.data instanceof Uint8Array) {
+      new Uint8Array(buffer, targetOffset, entry.data.length).set(entry.data);
+    }
+  });
+
+  return buffer;
+};
+
+const pct2Buffer = createPct2Buffer();
+const containerPath = path.join(datasetDir, "demo_tiles.pctc");
+await writeFile(containerPath, Buffer.from(pct2Buffer));
+
+const createHierarchyPage = () => {
+  const pageBytes = 64 * 1024;
+  const encodedPageBytes = pageBytes === 65536 ? 0 : pageBytes;
+  const buffer = new ArrayBuffer(pageBytes);
+  const view = new DataView(buffer);
+  view.setUint8(0, "P".charCodeAt(0));
+  view.setUint8(1, "C".charCodeAt(0));
+  view.setUint8(2, "H".charCodeAt(0));
+  view.setUint8(3, "1".charCodeAt(0));
+  view.setUint16(4, 1, true);
+  view.setUint16(6, encodedPageBytes, true);
+  view.setUint32(8, 0, true);
+  view.setUint32(12, 1, true);
+  view.setUint32(16, 0, true);
+
+  const offset = 20;
+  view.setBigUint64(offset, 1n, true);
+  view.setBigUint64(offset + 8, 0n, true);
+  view.setUint8(offset + 16, 0);
+  view.setUint8(offset + 17, 0);
+  view.setUint16(offset + 18, 0, true);
+  view.setUint32(offset + 20, pointCount, true);
+  view.setInt32(offset + 24, quantizedBounds.min[0], true);
+  view.setInt32(offset + 28, quantizedBounds.min[1], true);
+  view.setInt32(offset + 32, quantizedBounds.min[2], true);
+  view.setInt32(offset + 36, quantizedBounds.max[0], true);
+  view.setInt32(offset + 40, quantizedBounds.max[1], true);
+  view.setInt32(offset + 44, quantizedBounds.max[2], true);
+  view.setUint16(offset + 48, 0, true);
+  view.setUint16(offset + 50, 0, true);
+  view.setBigUint64(offset + 52, 0n, true);
+  view.setUint32(offset + 60, pct2Buffer.byteLength, true);
+  view.setUint32(offset + 64, 0, true);
+  view.setBigUint64(offset + 68, 0n, true);
+  view.setUint32(offset + 76, 0, true);
+
+  return buffer;
+};
+
+const hierarchyPath = path.join(datasetDir, "hierarchy.pch");
+await writeFile(hierarchyPath, Buffer.from(createHierarchyPage()));
+
 const manifest = {
   schemaVersion: 0.2,
   id: "demo",
@@ -85,7 +248,13 @@ const manifest = {
     { name: "rgb", type: "uint8", components: 3, role: "color" },
   ],
   roles: { position: "position", color: "rgb" },
-  boundsQuantization: { origin: [0, 0, 0], scale: [1, 1, 1] },
+  boundsQuantization: {
+    origin: quantizationOrigin,
+    scale: quantizationScale,
+  },
+  hierarchyUrl: "/datasets/demo/hierarchy.pch",
+  hierarchyPageBytes: 65536,
+  containers: [{ url: "/datasets/demo/demo_tiles.pctc" }],
   levels: [
     {
       id: "L0",

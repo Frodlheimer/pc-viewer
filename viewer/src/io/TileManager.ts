@@ -1,6 +1,8 @@
 import type {
+  BoundsQuantization,
   DatasetManifest,
   DatasetRoles,
+  TileContainer,
   TileManifest,
 } from "../types/Dataset";
 import type {
@@ -10,6 +12,7 @@ import type {
   TileRenderData,
 } from "../types/Tile";
 import { getBoundsCenter } from "../utils/bounds";
+import type { NodeRecord } from "../types/Hierarchy";
 import { loadTile } from "./TileLoader";
 import { loadPct2Tile } from "./Pct2TileLoader";
 import { loadTileFromContainer } from "./TileContainerLoader";
@@ -33,6 +36,52 @@ const getTileUrl = (tile: TileManifest): string => {
   throw new Error("Tile reference missing url.");
 };
 
+const getContainerUrl = (
+  containers: TileContainer[] | undefined,
+  index: number
+): string => {
+  if (!containers || containers.length === 0) {
+    throw new Error("Hierarchy dataset missing containers.");
+  }
+  const container = containers[index];
+  if (!container) {
+    throw new Error(`Container index ${index} missing.`);
+  }
+  return container.url;
+};
+
+const decodeQuantizedBounds = (
+  bounds: NodeRecord["bounds"],
+  quantization: BoundsQuantization
+): Bounds => {
+  const [ox, oy, oz] = quantization.origin;
+  const [sx, sy, sz] = quantization.scale;
+  const minX = ox + bounds.min[0] * sx;
+  const minY = oy + bounds.min[1] * sy;
+  const minZ = oz + bounds.min[2] * sz;
+  const maxX = ox + bounds.max[0] * sx;
+  const maxY = oy + bounds.max[1] * sy;
+  const maxZ = oz + bounds.max[2] * sz;
+  return [minX, minY, minZ, maxX, maxY, maxZ];
+};
+
+const toTileManifestFromNode = (
+  node: NodeRecord,
+  manifest: DatasetManifest
+): TileManifest => {
+  const bounds = decodeQuantizedBounds(node.bounds, manifest.boundsQuantization);
+  return {
+    id: `node-${String(node.nodeId)}`,
+    nodeId: node.nodeId,
+    bounds,
+    pointCount: node.pointCount,
+    format: "pct2",
+    containerUrl: getContainerUrl(manifest.containers, node.containerIndex),
+    byteOffset: node.byteOffset,
+    byteLength: node.byteLength,
+  };
+};
+
 const isPct2Tile = (tile: TileManifest) =>
   tile.format === "pct2" ||
   (tile.url ? tile.url.toLowerCase().endsWith(".pct2") : false);
@@ -54,8 +103,18 @@ const loadPct2RenderData = async (
   tile: TileManifest,
   roles: DatasetRoles
 ): Promise<TileRenderData> => {
+  if (tile.containerUrl) {
+    if (tile.byteOffset === undefined || tile.byteLength === undefined) {
+      throw new Error("Tile container reference missing byte range.");
+    }
+  }
+
   const parsed = tile.containerUrl
-    ? await loadTileFromContainer(tile.containerUrl, tile.byteOffset, tile.byteLength)
+    ? await loadTileFromContainer(
+        tile.containerUrl,
+        tile.byteOffset,
+        tile.byteLength
+      )
     : await loadPct2Tile(getTileUrl(tile));
   const positionName = roles.position;
   const rawPosition = parsed.attributes[positionName];
@@ -78,7 +137,7 @@ const loadPct2RenderData = async (
 
   return {
     id: tile.id,
-    nodeId: parsed.nodeId,
+    nodeId: tile.nodeId ?? parsed.nodeId,
     pointCount: parsed.pointCount,
     positions,
     colors,
@@ -116,21 +175,39 @@ const decodePositions = (
   return decoded;
 };
 
-export const loadRenderData = async (
+export const loadTilesForNodes = async (
+  manifest: DatasetManifest,
+  nodes: NodeRecord[]
+): Promise<TileRenderData[]> => {
+  const tiles = await Promise.all(
+    nodes.map((node) =>
+      loadPct2RenderData(toTileManifestFromNode(node, manifest), manifest.roles)
+    )
+  );
+  return tiles;
+};
+
+const loadTilesForManifestTiles = async (
   manifest: DatasetManifest
-): Promise<RenderData> => {
+): Promise<TileRenderData[]> => {
   const level = manifest.levels[0];
   if (!level) {
     throw new Error("Manifest has no levels.");
   }
 
-  const tiles = await Promise.all(
+  return Promise.all(
     level.tiles.map((tile) =>
       isPct2Tile(tile)
         ? loadPct2RenderData(tile, manifest.roles)
         : loadPct1RenderData(tile)
     )
   );
+};
+
+export const loadRenderData = async (
+  manifest: DatasetManifest
+): Promise<RenderData> => {
+  const tiles = await loadTilesForManifestTiles(manifest);
 
   const pointCountTotal = tiles.reduce(
     (sum, tile) => sum + tile.pointCount,

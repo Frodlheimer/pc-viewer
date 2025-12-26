@@ -1,13 +1,18 @@
 import { OrbitController, OrbitView, type PickingInfo } from "@deck.gl/core";
 import DeckGL from "@deck.gl/react";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPointCloudLayer } from "../layers/PointCloudLayerFactory";
+import { loadPage } from "../io/HierarchyPagingLoader";
 import { loadManifest } from "../io/ManifestLoader";
-import { loadRenderData } from "../io/TileManager";
+import { selectNodes } from "../io/NodeSelector";
+import { loadRenderData, loadTilesForNodes } from "../io/TileManager";
 import { useAppStore } from "../state/store";
+import type { DatasetManifest } from "../types/Dataset";
+import type { NodeRecord, Page } from "../types/Hierarchy";
 import { getDatasetById } from "../types/Dataset";
 import type { Vec3 } from "../types/Point";
-import type { TileRenderData } from "../types/Tile";
+import type { RenderData, TileRenderData } from "../types/Tile";
+import { getBoundsCenter } from "../utils/bounds";
 
 const getVec3 = (buffer: Float32Array, index: number): Vec3 => {
   const offset = index * 3;
@@ -31,13 +36,58 @@ const getWorldPosition = (tile: TileRenderData, index: number): Vec3 => {
   ];
 };
 
+const nodeKey = (nodeId: NodeRecord["nodeId"]) =>
+  typeof nodeId === "bigint" ? nodeId.toString() : String(nodeId);
+
+const buildRenderData = (
+  manifest: DatasetManifest,
+  tiles: TileRenderData[]
+): RenderData => {
+  const pointCountTotal = tiles.reduce(
+    (sum, tile) => sum + tile.pointCount,
+    0
+  );
+  return {
+    tiles,
+    pointCountTotal,
+    bounds: manifest.bounds,
+    center: getBoundsCenter(manifest.bounds),
+  };
+};
+
 export const Viewer = () => {
   const { state, dispatch } = useAppStore();
   const { activeDatasetId, renderData, showPointCloud, viewState } = state;
+  const [manifestState, setManifestState] = useState<{
+    datasetId: string;
+    manifest: DatasetManifest;
+  } | null>(null);
+  const [hierarchyState, setHierarchyState] = useState<{
+    datasetId: string;
+    page: Page;
+  } | null>(null);
+  const tileCacheRef = useRef<Map<string, TileRenderData>>(new Map());
+  const loadedNodeIdsRef = useRef<Set<string>>(new Set());
+  const selectionTimerRef = useRef<number | null>(null);
+  const datasetLoadIdRef = useRef(0);
+  const manifest =
+    manifestState?.datasetId === activeDatasetId
+      ? manifestState.manifest
+      : null;
+  const hierarchyPage =
+    hierarchyState?.datasetId === activeDatasetId ? hierarchyState.page : null;
 
   useEffect(() => {
     let cancelled = false;
     const dataset = getDatasetById(activeDatasetId);
+    datasetLoadIdRef.current += 1;
+    const loadId = datasetLoadIdRef.current;
+    tileCacheRef.current = new Map();
+    loadedNodeIdsRef.current = new Set();
+    if (selectionTimerRef.current !== null) {
+      window.clearTimeout(selectionTimerRef.current);
+      selectionTimerRef.current = null;
+    }
 
     if (!dataset) {
       dispatch({
@@ -52,12 +102,31 @@ export const Viewer = () => {
     dispatch({ type: "set-render-data", renderData: null });
 
     loadManifest(dataset.manifestUrl)
-      .then((manifest) => loadRenderData(manifest))
-      .then((data) => {
+      .then(async (loadedManifest) => {
         if (cancelled) return;
+        if (datasetLoadIdRef.current !== loadId) return;
+        setManifestState({ datasetId: activeDatasetId, manifest: loadedManifest });
+        dispatch({
+          type: "initialize-view-state",
+          datasetId: activeDatasetId,
+          bounds: loadedManifest.bounds,
+        });
+        if (loadedManifest.hierarchyUrl) {
+          const page = await loadPage(loadedManifest.hierarchyUrl, 0, {
+            pageBytes: loadedManifest.hierarchyPageBytes,
+          });
+          if (cancelled || datasetLoadIdRef.current !== loadId) return;
+          setHierarchyState({ datasetId: activeDatasetId, page });
+          return;
+        }
+
+        const data = await loadRenderData(loadedManifest);
+        if (cancelled || datasetLoadIdRef.current !== loadId) return;
+        tileCacheRef.current = new Map(
+          data.tiles.map((tile) => [tile.id, tile])
+        );
         dispatch({ type: "set-render-data", renderData: data });
         dispatch({ type: "set-status", status: "ready", error: null });
-        dispatch({ type: "reset-view-state", bounds: data.bounds });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -70,6 +139,72 @@ export const Viewer = () => {
       cancelled = true;
     };
   }, [activeDatasetId, dispatch]);
+
+  useEffect(() => {
+    if (!manifest?.hierarchyUrl || !hierarchyPage) {
+      return;
+    }
+
+    if (selectionTimerRef.current !== null) {
+      window.clearTimeout(selectionTimerRef.current);
+    }
+
+    selectionTimerRef.current = window.setTimeout(() => {
+      const selectedNodes = selectNodes(
+        { zoom: viewState.zoom },
+        hierarchyPage,
+        512
+      );
+      const missingNodes = selectedNodes.filter(
+        (node) => !loadedNodeIdsRef.current.has(nodeKey(node.nodeId))
+      );
+
+      if (import.meta.env.DEV) {
+        console.info("[hierarchy] node selection", {
+          zoom: viewState.zoom,
+          selected: selectedNodes.length,
+          missing: missingNodes.length,
+        });
+      }
+
+      if (missingNodes.length === 0) {
+        return;
+      }
+
+      const pendingKeys = missingNodes.map((node) => nodeKey(node.nodeId));
+      pendingKeys.forEach((key) => loadedNodeIdsRef.current.add(key));
+
+      const loadId = datasetLoadIdRef.current;
+      if (tileCacheRef.current.size === 0) {
+        dispatch({ type: "set-status", status: "loading", error: null });
+      }
+
+      loadTilesForNodes(manifest, missingNodes)
+        .then((tiles) => {
+          if (datasetLoadIdRef.current !== loadId) return;
+          tiles.forEach((tile) => tileCacheRef.current.set(tile.id, tile));
+          const merged = buildRenderData(
+            manifest,
+            Array.from(tileCacheRef.current.values())
+          );
+          dispatch({ type: "set-render-data", renderData: merged });
+          dispatch({ type: "set-status", status: "ready", error: null });
+        })
+        .catch((error: unknown) => {
+          if (datasetLoadIdRef.current !== loadId) return;
+          pendingKeys.forEach((key) => loadedNodeIdsRef.current.delete(key));
+          const message =
+            error instanceof Error ? error.message : "Unknown loading error.";
+          dispatch({ type: "set-status", status: "error", error: message });
+        });
+    }, 150);
+
+    return () => {
+      if (selectionTimerRef.current !== null) {
+        window.clearTimeout(selectionTimerRef.current);
+      }
+    };
+  }, [manifest, hierarchyPage, viewState.zoom, dispatch]);
 
   const handleHover = useCallback(
     (tile: TileRenderData, info: PickingInfo) => {

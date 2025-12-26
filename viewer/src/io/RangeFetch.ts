@@ -19,12 +19,18 @@ export const fetchRange = async (
   }
 
   if (response.status === 206) {
+    if (import.meta.env.DEV) {
+      console.info("[range] 206 partial", { url, start, length });
+    }
     return response.arrayBuffer();
   }
 
   const buffer = await response.arrayBuffer();
   if (start + length > buffer.byteLength) {
     throw new Error("Range slice exceeds payload size.");
+  }
+  if (import.meta.env.DEV) {
+    console.info("[range] fallback full fetch", { url, start, length });
   }
   return buffer.slice(start, start + length);
 };

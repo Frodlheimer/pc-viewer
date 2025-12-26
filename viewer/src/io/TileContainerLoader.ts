@@ -7,5 +7,8 @@ export const loadTileFromContainer = async (
   length: number
 ) => {
   const buffer = await fetchRange(containerUrl, offset, length);
+  if (import.meta.env.DEV) {
+    console.info("[container] tile loaded", { containerUrl, offset, length });
+  }
   return parsePct2Tile(buffer);
 };

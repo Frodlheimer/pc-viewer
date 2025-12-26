@@ -1,11 +1,12 @@
 import type {
   AttributeRole,
+  BoundsQuantization,
   DatasetAttribute,
   DatasetCrs,
   DatasetManifest,
   DatasetRoles,
-  BoundsQuantization,
   LevelManifest,
+  TileContainer,
 } from "../types/Dataset";
 import type { Bounds } from "../types/Tile";
 import type { Vec3 } from "../types/Point";
@@ -67,6 +68,23 @@ const normalizeBoundsQuantization = (value: unknown): BoundsQuantization => {
     return { origin: value.origin, scale: value.scale };
   }
   return { origin: [0, 0, 0], scale: [1, 1, 1] };
+};
+
+const normalizeContainers = (value: unknown): TileContainer[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const containers: TileContainer[] = [];
+  value.forEach((entry) => {
+    if (!isObject(entry) || typeof entry.url !== "string") {
+      return;
+    }
+    containers.push({
+      id: typeof entry.id === "string" ? entry.id : undefined,
+      url: entry.url,
+    });
+  });
+  return containers;
 };
 
 const normalizeAttributes = (
@@ -138,6 +156,12 @@ const normalizeManifest = (value: Record<string, unknown>): DatasetManifest => {
   const levels = Array.isArray(value.levels)
     ? (value.levels as LevelManifest[])
     : [];
+  const hierarchyUrl =
+    typeof value.hierarchyUrl === "string" ? value.hierarchyUrl : undefined;
+  const hierarchyPageBytes = isFiniteNumber(value.hierarchyPageBytes)
+    ? value.hierarchyPageBytes
+    : undefined;
+  const containers = normalizeContainers(value.containers);
 
   return {
     schemaVersion,
@@ -148,6 +172,9 @@ const normalizeManifest = (value: Record<string, unknown>): DatasetManifest => {
     attributes,
     roles,
     boundsQuantization,
+    hierarchyUrl,
+    hierarchyPageBytes,
+    containers: containers.length > 0 ? containers : undefined,
     levels,
     bounds,
   };

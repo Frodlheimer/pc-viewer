@@ -32,6 +32,11 @@ export type BoundsQuantization = {
   scale: Vec3;
 };
 
+export type TileContainer = {
+  id?: string;
+  url: string;
+};
+
 export type TileUrlRef = {
   url: string;
   containerUrl?: never;
@@ -50,6 +55,7 @@ export type TileRef = TileUrlRef | TileContainerRef;
 
 export type TileManifest = {
   id: string;
+  nodeId?: bigint | number;
   bounds: Bounds;
   pointCount: number;
   format?: TileFormat;
@@ -69,6 +75,9 @@ export type DatasetManifest = {
   attributes: DatasetAttribute[];
   roles: DatasetRoles;
   boundsQuantization: BoundsQuantization;
+  hierarchyUrl?: string;
+  hierarchyPageBytes?: number;
+  containers?: TileContainer[];
   levels: LevelManifest[];
   bounds: Bounds;
 };
