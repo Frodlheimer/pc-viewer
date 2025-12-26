@@ -12,6 +12,7 @@ import type {
 import { getBoundsCenter } from "../utils/bounds";
 import { loadTile } from "./TileLoader";
 import { loadPct2Tile } from "./Pct2TileLoader";
+import { loadTileFromContainer } from "./TileContainerLoader";
 import type { TypedArray } from "../types/Pct2";
 
 const toTileBounds = (bounds: Bounds): TileBounds => {
@@ -27,7 +28,7 @@ const getTileUrl = (tile: TileManifest): string => {
     return tile.url;
   }
   if (tile.containerUrl) {
-    throw new Error("Tile container references are not supported yet.");
+    throw new Error("Tile container references require range loading.");
   }
   throw new Error("Tile reference missing url.");
 };
@@ -53,7 +54,9 @@ const loadPct2RenderData = async (
   tile: TileManifest,
   roles: DatasetRoles
 ): Promise<TileRenderData> => {
-  const parsed = await loadPct2Tile(getTileUrl(tile));
+  const parsed = tile.containerUrl
+    ? await loadTileFromContainer(tile.containerUrl, tile.byteOffset, tile.byteLength)
+    : await loadPct2Tile(getTileUrl(tile));
   const positionName = roles.position;
   const rawPosition = parsed.attributes[positionName];
   if (!rawPosition) {
