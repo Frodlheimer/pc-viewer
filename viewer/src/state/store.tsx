@@ -20,14 +20,18 @@ export type ViewState = {
 
 export type HoverInfo = {
   screen: { x: number; y: number };
-  index: number;
-  position: Vec3;
+  tileId: string;
+  nodeId?: bigint | number;
+  indexWithinTile: number;
+  worldPosition: Vec3;
   color?: Vec3;
 };
 
 export type SelectionInfo = {
-  index: number;
-  position: Vec3;
+  tileId: string;
+  nodeId?: bigint | number;
+  indexWithinTile: number;
+  worldPosition: Vec3;
   color?: Vec3;
 };
 

@@ -27,9 +27,12 @@ export const Sidebar = () => {
         <div className="sidebar-meta">Status: {status}</div>
         {error && <div className="sidebar-error">Error: {error}</div>}
         {renderData && (
-          <div className="sidebar-meta">
-            Points: {renderData.pointCount.toLocaleString()}
-          </div>
+          <>
+            <div className="sidebar-meta">
+              Points: {renderData.pointCountTotal.toLocaleString()}
+            </div>
+            <div className="sidebar-meta">Tiles: {renderData.tiles.length}</div>
+          </>
         )}
       </div>
 
@@ -37,10 +40,14 @@ export const Sidebar = () => {
         <div className="sidebar-title">Hover</div>
         {hover ? (
           <>
-            <div className="sidebar-meta">Index: {hover.index}</div>
+            <div className="sidebar-meta">Tile: {hover.tileId}</div>
+            <div className="sidebar-meta">Index: {hover.indexWithinTile}</div>
             <div className="sidebar-meta">
-              Pos: {hover.position.map((value) => value.toFixed(2)).join(", ")}
+              Pos: {hover.worldPosition.map((value) => value.toFixed(2)).join(", ")}
             </div>
+            {hover.nodeId !== undefined && (
+              <div className="sidebar-meta">Node: {hover.nodeId.toString()}</div>
+            )}
           </>
         ) : (
           <div className="sidebar-meta">None</div>
@@ -51,11 +58,19 @@ export const Sidebar = () => {
         <div className="sidebar-title">Selection</div>
         {selection ? (
           <>
-            <div className="sidebar-meta">Index: {selection.index}</div>
+            <div className="sidebar-meta">Tile: {selection.tileId}</div>
+            <div className="sidebar-meta">
+              Index: {selection.indexWithinTile}
+            </div>
             <div className="sidebar-meta">
               Pos:{" "}
-              {selection.position.map((value) => value.toFixed(2)).join(", ")}
+              {selection.worldPosition.map((value) => value.toFixed(2)).join(", ")}
             </div>
+            {selection.nodeId !== undefined && (
+              <div className="sidebar-meta">
+                Node: {selection.nodeId.toString()}
+              </div>
+            )}
           </>
         ) : (
           <div className="sidebar-meta">None</div>

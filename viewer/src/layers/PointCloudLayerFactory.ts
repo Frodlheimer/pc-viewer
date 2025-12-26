@@ -1,6 +1,6 @@
 import { PointCloudLayer } from "@deck.gl/layers";
 import type { PickingInfo } from "@deck.gl/core";
-import type { RenderData } from "../types/Tile";
+import type { TileRenderData } from "../types/Tile";
 
 type BinaryAttributes = {
   length: number;
@@ -16,28 +16,28 @@ export type PointCloudCallbacks = {
 };
 
 export const createPointCloudLayer = (
-  renderData: RenderData,
+  tile: TileRenderData,
   callbacks: PointCloudCallbacks
 ) => {
   const attributes: BinaryAttributes["attributes"] = {
-    getPosition: { value: renderData.positions, size: 3 },
+    getPosition: { value: tile.positions, size: 3 },
   };
 
-  if (renderData.colors) {
+  if (tile.colors) {
     attributes.getColor = {
-      value: renderData.colors,
+      value: tile.colors,
       size: 3,
       normalized: true,
     };
   }
 
   const data: BinaryAttributes = {
-    length: renderData.pointCount,
+    length: tile.pointCount,
     attributes,
   };
 
   return new PointCloudLayer<BinaryAttributes>({
-    id: "pointcloud",
+    id: `pointcloud-${tile.id}`,
     data,
     pickable: true,
     autoHighlight: true,

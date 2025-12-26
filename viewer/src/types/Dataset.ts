@@ -1,10 +1,13 @@
 import type { Bounds } from "./Tile";
 
+export type TileFormat = "pct1" | "pct2";
+
 export type TileManifest = {
   id: string;
   url: string;
   bounds: Bounds;
   pointCount: number;
+  format?: TileFormat;
 };
 
 export type LevelManifest = {
