@@ -1,4 +1,9 @@
-import { OrbitController, OrbitView, type PickingInfo } from "@deck.gl/core";
+import {
+  OrbitController,
+  OrbitView,
+  OrbitViewport,
+  type PickingInfo,
+} from "@deck.gl/core";
 import DeckGL from "@deck.gl/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPointCloudLayer } from "../layers/PointCloudLayerFactory";
@@ -76,8 +81,11 @@ export const Viewer = () => {
     datasetId: string;
     page: Page;
   } | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const tileCacheRef = useRef<Map<string, TileRenderData>>(new Map());
   const loadedNodeIdsRef = useRef<Set<string>>(new Set());
+  const previousSelectionRef = useRef<Set<string>>(new Set());
   const selectionTimerRef = useRef<number | null>(null);
   const datasetLoadIdRef = useRef(0);
   const inFlightRequestsRef = useRef(0);
@@ -93,12 +101,47 @@ export const Viewer = () => {
     hierarchyState?.datasetId === activeDatasetId ? hierarchyState.page : null;
 
   useEffect(() => {
+    const element = containerRef.current;
+    if (!element) {
+      return undefined;
+    }
+    const updateSize = () => {
+      const rect = element.getBoundingClientRect();
+      const width = Math.max(1, Math.round(rect.width));
+      const height = Math.max(1, Math.round(rect.height));
+      setViewportSize((current) =>
+        current.width === width && current.height === height
+          ? current
+          : { width, height }
+      );
+    };
+    updateSize();
+    const observer = new ResizeObserver(() => updateSize());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const orbitViewport = useMemo(
+    () =>
+      new OrbitViewport({
+        width: viewportSize.width,
+        height: viewportSize.height,
+        target: viewState.target,
+        zoom: viewState.zoom,
+        rotationX: viewState.rotationX,
+        rotationOrbit: viewState.rotationOrbit,
+      }),
+    [viewportSize, viewState]
+  );
+
+  useEffect(() => {
     let cancelled = false;
     const dataset = getDatasetById(activeDatasetId);
     datasetLoadIdRef.current += 1;
     const loadId = datasetLoadIdRef.current;
     tileCacheRef.current = new Map();
     loadedNodeIdsRef.current = new Set();
+    previousSelectionRef.current = new Set();
     inFlightRequestsRef.current = 0;
     if (selectionTimerRef.current !== null) {
       window.clearTimeout(selectionTimerRef.current);
@@ -197,21 +240,23 @@ export const Viewer = () => {
 
     selectionTimerRef.current = window.setTimeout(() => {
       const selectionStart = performance.now();
-      const selectedNodes = selectNodes(
-        { zoom: viewState.zoom },
-        hierarchyPage,
-        Math.max(
-          1,
-          Math.floor(budgets.targetVisiblePoints / budgets.tilePointCap)
-        )
+      const selectionResult = selectNodes({
+        viewport: orbitViewport,
+        width: viewportSize.width,
+        height: viewportSize.height,
+        nodes: hierarchyPage.records,
+        boundsQuantization: manifest.boundsQuantization,
+        runtimeBudgets: budgets,
+        previousSelection: previousSelectionRef.current,
+      });
+      const selectedNodes = selectionResult.selected;
+      previousSelectionRef.current = new Set(
+        selectedNodes.map((node) => nodeKey(node.nodeId))
       );
       const missingNodes = selectedNodes.filter(
         (node) => !loadedNodeIdsRef.current.has(nodeKey(node.nodeId))
       );
-      const selectedPoints = selectedNodes.reduce(
-        (sum, node) => sum + node.pointCount,
-        0
-      );
+      const selectedPoints = selectionResult.diagnostics.visiblePoints;
       const cpuCacheBytes = Array.from(tileCacheRef.current.values()).reduce(
         (sum, tile) =>
           sum +
@@ -225,13 +270,15 @@ export const Viewer = () => {
           zoom: viewState.zoom,
           selected: selectedNodes.length,
           missing: missingNodes.length,
+          levels: selectionResult.diagnostics.selectedLevels,
+          reasons: selectionResult.diagnostics.reasonCounts,
         });
       }
 
       dispatch({
         type: "set-runtime-stats",
         stats: {
-          selectedNodes: selectedNodes.length,
+          selectedNodes: selectionResult.diagnostics.selectedCount,
           visiblePoints: selectedPoints,
           loadedTiles: tileCacheRef.current.size,
           cpuCacheBytes,
@@ -326,7 +373,15 @@ export const Viewer = () => {
         window.clearTimeout(selectionTimerRef.current);
       }
     };
-  }, [manifest, hierarchyPage, viewState.zoom, dispatch, budgets]);
+  }, [
+    manifest,
+    hierarchyPage,
+    viewState,
+    viewportSize,
+    orbitViewport,
+    dispatch,
+    budgets,
+  ]);
 
   const handleHover = useCallback(
     (tile: TileRenderData, info: PickingInfo) => {
@@ -396,7 +451,7 @@ export const Viewer = () => {
   }, [renderData, showPointCloud, handleHover, handleClick, patches, editMode]);
 
   return (
-    <div className="viewer-root">
+    <div className="viewer-root" ref={containerRef}>
       <DeckGL
         views={new OrbitView()}
         controller={{ type: OrbitController }}
