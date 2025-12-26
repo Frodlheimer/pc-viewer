@@ -9,6 +9,8 @@ import {
 } from "react";
 import type { Bounds, RenderData } from "../types/Tile";
 import type { Vec3 } from "../types/Point";
+import type { TypedArray } from "../types/Pct2";
+import type { PerformanceProfile } from "../config/budgets";
 import { getBoundsCenter } from "../utils/bounds";
 
 export type ViewState = {
@@ -16,6 +18,41 @@ export type ViewState = {
   zoom: number;
   rotationX: number;
   rotationOrbit: number;
+};
+
+export type EditMode =
+  | "none"
+  | "add"
+  | "delete"
+  | "update"
+  | "measure"
+  | "select";
+
+export type AddedPointsPatch = {
+  positions: Float32Array;
+  colors?: Uint8Array;
+  attributes?: Record<string, TypedArray>;
+};
+
+export type PatchState = {
+  addedPoints: AddedPointsPatch;
+  deleted: Map<string, Uint8Array | boolean[]>;
+  updatedAttributes: Map<string, Map<number, Record<string, number>>>;
+};
+
+export type RuntimeStats = {
+  selectedNodes: number;
+  visiblePoints: number;
+  loadedTiles: number;
+  cpuCacheBytes: number;
+  inFlightRequests: number;
+  queuedRequests: number;
+  lastSelectionUpdateMs: number | null;
+};
+
+export type AppSettings = {
+  performanceProfile: PerformanceProfile;
+  debugEnabled: boolean;
 };
 
 export type HoverInfo = {
@@ -40,6 +77,10 @@ export type LoadStatus = "idle" | "loading" | "ready" | "error";
 export type AppState = {
   viewState: ViewState;
   viewStateDatasetId: string | null;
+  editMode: EditMode;
+  patches: PatchState;
+  settings: AppSettings;
+  runtimeStats: RuntimeStats;
   hover: HoverInfo | null;
   selection: SelectionInfo | null;
   activeDatasetId: string;
@@ -52,6 +93,9 @@ export type AppState = {
 type AppAction =
   | { type: "set-view-state"; viewState: ViewState }
   | { type: "initialize-view-state"; datasetId: string; bounds: Bounds }
+  | { type: "set-edit-mode"; mode: EditMode }
+  | { type: "set-settings"; settings: Partial<AppSettings> }
+  | { type: "set-runtime-stats"; stats: Partial<RuntimeStats> }
   | { type: "set-hover"; hover: HoverInfo | null }
   | { type: "set-selection"; selection: SelectionInfo | null }
   | { type: "set-active-dataset"; datasetId: string }
@@ -67,6 +111,27 @@ const initialState: AppState = {
     rotationOrbit: 30,
   },
   viewStateDatasetId: null,
+  editMode: "none",
+  patches: {
+    addedPoints: {
+      positions: new Float32Array(0),
+    },
+    deleted: new Map(),
+    updatedAttributes: new Map(),
+  },
+  settings: {
+    performanceProfile: "auto",
+    debugEnabled: false,
+  },
+  runtimeStats: {
+    selectedNodes: 0,
+    visiblePoints: 0,
+    loadedTiles: 0,
+    cpuCacheBytes: 0,
+    inFlightRequests: 0,
+    queuedRequests: 0,
+    lastSelectionUpdateMs: null,
+  },
   hover: null,
   selection: null,
   activeDatasetId: "demo",
@@ -96,6 +161,18 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
         },
       };
     }
+    case "set-edit-mode":
+      return { ...state, editMode: action.mode };
+    case "set-settings":
+      return {
+        ...state,
+        settings: { ...state.settings, ...action.settings },
+      };
+    case "set-runtime-stats":
+      return {
+        ...state,
+        runtimeStats: { ...state.runtimeStats, ...action.stats },
+      };
     case "set-hover":
       return { ...state, hover: action.hover };
     case "set-selection":

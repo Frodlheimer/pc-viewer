@@ -38,6 +38,12 @@
   color: #d8e2ea;
 }
 
+.toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
 .toolbar-title {
   font-size: 16px;
   font-weight: 600;
@@ -50,6 +56,15 @@
   gap: 8px;
   font-size: 13px;
   color: #b7c5cf;
+}
+
+.toolbar-select {
+  border-radius: 6px;
+  border: 1px solid rgba(120, 155, 174, 0.3);
+  background: rgba(10, 13, 15, 0.8);
+  color: #dbe6ed;
+  padding: 4px 8px;
+  font-size: 12px;
 }
 
 .sidebar {
@@ -84,6 +99,26 @@
   color: #dbe6ed;
   padding: 8px 10px;
   font-size: 13px;
+}
+
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: #b7c5cf;
+  margin-top: 8px;
+}
+
+.sidebar-toggle input {
+  accent-color: #6fb7d6;
+}
+
+.sidebar-toggle select {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 12px;
 }
 
 .sidebar-meta {

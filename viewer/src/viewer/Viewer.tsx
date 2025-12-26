@@ -2,6 +2,8 @@ import { OrbitController, OrbitView, type PickingInfo } from "@deck.gl/core";
 import DeckGL from "@deck.gl/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPointCloudLayer } from "../layers/PointCloudLayerFactory";
+import { createPatchLayers } from "../layers/PatchLayersFactory";
+import { getRuntimeBudgets } from "../config/budgets";
 import { loadPage } from "../io/HierarchyPagingLoader";
 import { loadManifest } from "../io/ManifestLoader";
 import { selectNodes } from "../io/NodeSelector";
@@ -57,7 +59,15 @@ const buildRenderData = (
 
 export const Viewer = () => {
   const { state, dispatch } = useAppStore();
-  const { activeDatasetId, renderData, showPointCloud, viewState } = state;
+  const {
+    activeDatasetId,
+    renderData,
+    showPointCloud,
+    viewState,
+    patches,
+    editMode,
+    settings,
+  } = state;
   const [manifestState, setManifestState] = useState<{
     datasetId: string;
     manifest: DatasetManifest;
@@ -70,6 +80,11 @@ export const Viewer = () => {
   const loadedNodeIdsRef = useRef<Set<string>>(new Set());
   const selectionTimerRef = useRef<number | null>(null);
   const datasetLoadIdRef = useRef(0);
+  const inFlightRequestsRef = useRef(0);
+  const budgets = useMemo(
+    () => getRuntimeBudgets(settings.performanceProfile),
+    [settings.performanceProfile]
+  );
   const manifest =
     manifestState?.datasetId === activeDatasetId
       ? manifestState.manifest
@@ -84,10 +99,23 @@ export const Viewer = () => {
     const loadId = datasetLoadIdRef.current;
     tileCacheRef.current = new Map();
     loadedNodeIdsRef.current = new Set();
+    inFlightRequestsRef.current = 0;
     if (selectionTimerRef.current !== null) {
       window.clearTimeout(selectionTimerRef.current);
       selectionTimerRef.current = null;
     }
+    dispatch({
+      type: "set-runtime-stats",
+      stats: {
+        selectedNodes: 0,
+        visiblePoints: 0,
+        loadedTiles: 0,
+        cpuCacheBytes: 0,
+        inFlightRequests: 0,
+        queuedRequests: 0,
+        lastSelectionUpdateMs: null,
+      },
+    });
 
     if (!dataset) {
       dispatch({
@@ -127,6 +155,24 @@ export const Viewer = () => {
         );
         dispatch({ type: "set-render-data", renderData: data });
         dispatch({ type: "set-status", status: "ready", error: null });
+        dispatch({
+          type: "set-runtime-stats",
+          stats: {
+            selectedNodes: data.tiles.length,
+            visiblePoints: data.pointCountTotal,
+            loadedTiles: data.tiles.length,
+            cpuCacheBytes: data.tiles.reduce(
+              (sum, tile) =>
+                sum +
+                tile.positions.byteLength +
+                (tile.colors?.byteLength ?? 0),
+              0
+            ),
+            inFlightRequests: 0,
+            queuedRequests: 0,
+            lastSelectionUpdateMs: 0,
+          },
+        });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -150,13 +196,28 @@ export const Viewer = () => {
     }
 
     selectionTimerRef.current = window.setTimeout(() => {
+      const selectionStart = performance.now();
       const selectedNodes = selectNodes(
         { zoom: viewState.zoom },
         hierarchyPage,
-        512
+        Math.max(
+          1,
+          Math.floor(budgets.targetVisiblePoints / budgets.tilePointCap)
+        )
       );
       const missingNodes = selectedNodes.filter(
         (node) => !loadedNodeIdsRef.current.has(nodeKey(node.nodeId))
+      );
+      const selectedPoints = selectedNodes.reduce(
+        (sum, node) => sum + node.pointCount,
+        0
+      );
+      const cpuCacheBytes = Array.from(tileCacheRef.current.values()).reduce(
+        (sum, tile) =>
+          sum +
+          tile.positions.byteLength +
+          (tile.colors?.byteLength ?? 0),
+        0
       );
 
       if (import.meta.env.DEV) {
@@ -167,7 +228,27 @@ export const Viewer = () => {
         });
       }
 
+      dispatch({
+        type: "set-runtime-stats",
+        stats: {
+          selectedNodes: selectedNodes.length,
+          visiblePoints: selectedPoints,
+          loadedTiles: tileCacheRef.current.size,
+          cpuCacheBytes,
+          inFlightRequests: inFlightRequestsRef.current,
+          queuedRequests: 0,
+        },
+      });
+
       if (missingNodes.length === 0) {
+        dispatch({
+          type: "set-runtime-stats",
+          stats: {
+            lastSelectionUpdateMs: Math.round(
+              performance.now() - selectionStart
+            ),
+          },
+        });
         return;
       }
 
@@ -175,6 +256,11 @@ export const Viewer = () => {
       pendingKeys.forEach((key) => loadedNodeIdsRef.current.add(key));
 
       const loadId = datasetLoadIdRef.current;
+      inFlightRequestsRef.current += missingNodes.length;
+      dispatch({
+        type: "set-runtime-stats",
+        stats: { inFlightRequests: inFlightRequestsRef.current },
+      });
       if (tileCacheRef.current.size === 0) {
         dispatch({ type: "set-status", status: "loading", error: null });
       }
@@ -183,28 +269,64 @@ export const Viewer = () => {
         .then((tiles) => {
           if (datasetLoadIdRef.current !== loadId) return;
           tiles.forEach((tile) => tileCacheRef.current.set(tile.id, tile));
+          inFlightRequestsRef.current = Math.max(
+            0,
+            inFlightRequestsRef.current - missingNodes.length
+          );
           const merged = buildRenderData(
             manifest,
             Array.from(tileCacheRef.current.values())
           );
           dispatch({ type: "set-render-data", renderData: merged });
           dispatch({ type: "set-status", status: "ready", error: null });
+          dispatch({
+            type: "set-runtime-stats",
+            stats: {
+              loadedTiles: tileCacheRef.current.size,
+              cpuCacheBytes: Array.from(
+                tileCacheRef.current.values()
+              ).reduce(
+                (sum, tile) =>
+                  sum +
+                  tile.positions.byteLength +
+                  (tile.colors?.byteLength ?? 0),
+                0
+              ),
+              inFlightRequests: inFlightRequestsRef.current,
+              lastSelectionUpdateMs: Math.round(
+                performance.now() - selectionStart
+              ),
+            },
+          });
         })
         .catch((error: unknown) => {
           if (datasetLoadIdRef.current !== loadId) return;
           pendingKeys.forEach((key) => loadedNodeIdsRef.current.delete(key));
+          inFlightRequestsRef.current = Math.max(
+            0,
+            inFlightRequestsRef.current - missingNodes.length
+          );
           const message =
             error instanceof Error ? error.message : "Unknown loading error.";
           dispatch({ type: "set-status", status: "error", error: message });
+          dispatch({
+            type: "set-runtime-stats",
+            stats: {
+              inFlightRequests: inFlightRequestsRef.current,
+              lastSelectionUpdateMs: Math.round(
+                performance.now() - selectionStart
+              ),
+            },
+          });
         });
-    }, 150);
+    }, budgets.viewDebounceMs);
 
     return () => {
       if (selectionTimerRef.current !== null) {
         window.clearTimeout(selectionTimerRef.current);
       }
     };
-  }, [manifest, hierarchyPage, viewState.zoom, dispatch]);
+  }, [manifest, hierarchyPage, viewState.zoom, dispatch, budgets]);
 
   const handleHover = useCallback(
     (tile: TileRenderData, info: PickingInfo) => {
@@ -260,16 +382,18 @@ export const Viewer = () => {
   );
 
   const layers = useMemo(() => {
-    if (!renderData || !showPointCloud) {
-      return [];
-    }
-    return renderData.tiles.map((tile) =>
-      createPointCloudLayer(tile, {
-        onHover: (info) => handleHover(tile, info),
-        onClick: (info) => handleClick(tile, info),
-      })
-    );
-  }, [renderData, showPointCloud, handleHover, handleClick]);
+    const baseLayers =
+      renderData && showPointCloud
+        ? renderData.tiles.map((tile) =>
+            createPointCloudLayer(tile, {
+              onHover: (info) => handleHover(tile, info),
+              onClick: (info) => handleClick(tile, info),
+            })
+          )
+        : [];
+    const patchLayers = createPatchLayers(patches, editMode);
+    return [...baseLayers, ...patchLayers];
+  }, [renderData, showPointCloud, handleHover, handleClick, patches, editMode]);
 
   return (
     <div className="viewer-root">

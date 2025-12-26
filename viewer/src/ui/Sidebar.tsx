@@ -3,7 +3,11 @@ import { DATASETS } from "../types/Dataset";
 
 export const Sidebar = () => {
   const { state, dispatch } = useAppStore();
-  const { renderData, status, error, hover, selection } = state;
+  const { renderData, status, error, hover, selection, settings, runtimeStats } =
+    state;
+  const addedCount = Math.floor(
+    state.patches.addedPoints.positions.length / 3
+  );
 
   return (
     <div className="sidebar">
@@ -74,6 +78,83 @@ export const Sidebar = () => {
           </>
         ) : (
           <div className="sidebar-meta">None</div>
+        )}
+      </div>
+
+      <div className="sidebar-section">
+        <div className="sidebar-title">Patches</div>
+        <div className="sidebar-meta">Mode: {state.editMode}</div>
+        <div className="sidebar-meta">Added: {addedCount}</div>
+        <div className="sidebar-meta">
+          Deleted: {state.patches.deleted.size}
+        </div>
+        <div className="sidebar-meta">
+          Updated: {state.patches.updatedAttributes.size}
+        </div>
+      </div>
+
+      <div className="sidebar-section">
+        <div className="sidebar-title">Debug</div>
+        <label className="sidebar-toggle">
+          <input
+            type="checkbox"
+            checked={settings.debugEnabled}
+            onChange={(event) =>
+              dispatch({
+                type: "set-settings",
+                settings: { debugEnabled: event.target.checked },
+              })
+            }
+          />
+          <span>Debug Enabled</span>
+        </label>
+        <label className="sidebar-toggle">
+          <span>Profile</span>
+          <select
+            value={settings.performanceProfile}
+            onChange={(event) =>
+              dispatch({
+                type: "set-settings",
+                settings: {
+                  performanceProfile: event.target
+                    .value as typeof settings.performanceProfile,
+                },
+              })
+            }
+          >
+            <option value="auto">Auto</option>
+            <option value="low">Low</option>
+            <option value="balanced">Balanced</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+        {settings.debugEnabled && (
+          <>
+            <div className="sidebar-meta">
+              Selected Nodes: {runtimeStats.selectedNodes}
+            </div>
+            <div className="sidebar-meta">
+              Visible Points: {runtimeStats.visiblePoints.toLocaleString()}
+            </div>
+            <div className="sidebar-meta">
+              Loaded Tiles: {runtimeStats.loadedTiles}
+            </div>
+            <div className="sidebar-meta">
+              CPU Cache: {runtimeStats.cpuCacheBytes.toLocaleString()} bytes
+            </div>
+            <div className="sidebar-meta">
+              In-Flight: {runtimeStats.inFlightRequests}
+            </div>
+            <div className="sidebar-meta">
+              Queued: {runtimeStats.queuedRequests}
+            </div>
+            <div className="sidebar-meta">
+              Last Selection:{" "}
+              {runtimeStats.lastSelectionUpdateMs !== null
+                ? `${runtimeStats.lastSelectionUpdateMs} ms`
+                : "n/a"}
+            </div>
+          </>
         )}
       </div>
     </div>
