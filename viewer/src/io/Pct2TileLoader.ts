@@ -196,8 +196,11 @@ export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
   };
 };
 
-export const loadPct2Tile = async (url: string): Promise<ParsedTile2> => {
-  const response = await fetch(url);
+export const loadPct2Tile = async (
+  url: string,
+  signal?: AbortSignal
+): Promise<ParsedTile2> => {
+  const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(`PCT2 tile load failed (${response.status})`);
   }

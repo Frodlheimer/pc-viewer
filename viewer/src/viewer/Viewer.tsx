@@ -12,7 +12,8 @@ import { getRuntimeBudgets } from "../config/budgets";
 import { loadPage } from "../io/HierarchyPagingLoader";
 import { loadManifest } from "../io/ManifestLoader";
 import { selectNodes } from "../io/NodeSelector";
-import { loadRenderData, loadTilesForNodes } from "../io/TileManager";
+import { TileService, isAbortError } from "../io/TileService";
+import { loadRenderData } from "../io/TileManager";
 import { useAppStore } from "../state/store";
 import type { DatasetManifest } from "../types/Dataset";
 import type { NodeRecord, Page } from "../types/Hierarchy";
@@ -83,12 +84,12 @@ export const Viewer = () => {
   } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
-  const tileCacheRef = useRef<Map<string, TileRenderData>>(new Map());
-  const loadedNodeIdsRef = useRef<Set<string>>(new Set());
+  const tileServiceRef = useRef<TileService>(new TileService());
+  const selectedKeysRef = useRef<Set<string>>(new Set());
   const previousSelectionRef = useRef<Set<string>>(new Set());
   const selectionTimerRef = useRef<number | null>(null);
   const datasetLoadIdRef = useRef(0);
-  const inFlightRequestsRef = useRef(0);
+  const selectionRunIdRef = useRef(0);
   const budgets = useMemo(
     () => getRuntimeBudgets(settings.performanceProfile),
     [settings.performanceProfile]
@@ -139,10 +140,9 @@ export const Viewer = () => {
     const dataset = getDatasetById(activeDatasetId);
     datasetLoadIdRef.current += 1;
     const loadId = datasetLoadIdRef.current;
-    tileCacheRef.current = new Map();
-    loadedNodeIdsRef.current = new Set();
+    tileServiceRef.current.clear();
+    selectedKeysRef.current = new Set();
     previousSelectionRef.current = new Set();
-    inFlightRequestsRef.current = 0;
     if (selectionTimerRef.current !== null) {
       window.clearTimeout(selectionTimerRef.current);
       selectionTimerRef.current = null;
@@ -193,9 +193,6 @@ export const Viewer = () => {
 
         const data = await loadRenderData(loadedManifest);
         if (cancelled || datasetLoadIdRef.current !== loadId) return;
-        tileCacheRef.current = new Map(
-          data.tiles.map((tile) => [tile.id, tile])
-        );
         dispatch({ type: "set-render-data", renderData: data });
         dispatch({ type: "set-status", status: "ready", error: null });
         dispatch({
@@ -239,6 +236,8 @@ export const Viewer = () => {
     }
 
     selectionTimerRef.current = window.setTimeout(() => {
+      selectionRunIdRef.current += 1;
+      const selectionRunId = selectionRunIdRef.current;
       const selectionStart = performance.now();
       const selectionResult = selectNodes({
         viewport: orbitViewport,
@@ -250,26 +249,40 @@ export const Viewer = () => {
         previousSelection: previousSelectionRef.current,
       });
       const selectedNodes = selectionResult.selected;
-      previousSelectionRef.current = new Set(
+      const nextSelectedKeys = new Set(
         selectedNodes.map((node) => nodeKey(node.nodeId))
       );
-      const missingNodes = selectedNodes.filter(
-        (node) => !loadedNodeIdsRef.current.has(nodeKey(node.nodeId))
-      );
+      const previousKeys = selectedKeysRef.current;
+      selectedKeysRef.current = nextSelectedKeys;
+      previousSelectionRef.current = nextSelectedKeys;
+
+      previousKeys.forEach((key) => {
+        if (!nextSelectedKeys.has(key)) {
+          tileServiceRef.current.unpin(key);
+          tileServiceRef.current.cancelTile(key);
+        }
+      });
+      nextSelectedKeys.forEach((key) => tileServiceRef.current.pin(key));
+
       const selectedPoints = selectionResult.diagnostics.visiblePoints;
-      const cpuCacheBytes = Array.from(tileCacheRef.current.values()).reduce(
-        (sum, tile) =>
-          sum +
-          tile.positions.byteLength +
-          (tile.colors?.byteLength ?? 0),
-        0
-      );
+      const cacheStats = tileServiceRef.current.stats();
+      const cachedTiles: TileRenderData[] = [];
+      selectedNodes.forEach((node) => {
+        const tile = tileServiceRef.current.getCachedTile(nodeKey(node.nodeId));
+        if (tile) {
+          cachedTiles.push(tile);
+        }
+      });
+      dispatch({
+        type: "set-render-data",
+        renderData:
+          cachedTiles.length > 0 ? buildRenderData(manifest, cachedTiles) : null,
+      });
 
       if (import.meta.env.DEV) {
         console.info("[hierarchy] node selection", {
           zoom: viewState.zoom,
           selected: selectedNodes.length,
-          missing: missingNodes.length,
           levels: selectionResult.diagnostics.selectedLevels,
           reasons: selectionResult.diagnostics.reasonCounts,
         });
@@ -280,14 +293,15 @@ export const Viewer = () => {
         stats: {
           selectedNodes: selectionResult.diagnostics.selectedCount,
           visiblePoints: selectedPoints,
-          loadedTiles: tileCacheRef.current.size,
-          cpuCacheBytes,
-          inFlightRequests: inFlightRequestsRef.current,
+          loadedTiles: cacheStats.items,
+          cpuCacheBytes: cacheStats.bytes,
+          inFlightRequests: cacheStats.inFlight,
           queuedRequests: 0,
         },
       });
 
-      if (missingNodes.length === 0) {
+      if (selectedNodes.length === 0) {
+        dispatch({ type: "set-status", status: "ready", error: null });
         dispatch({
           type: "set-runtime-stats",
           stats: {
@@ -299,67 +313,103 @@ export const Viewer = () => {
         return;
       }
 
-      const pendingKeys = missingNodes.map((node) => nodeKey(node.nodeId));
-      pendingKeys.forEach((key) => loadedNodeIdsRef.current.add(key));
-
-      const loadId = datasetLoadIdRef.current;
-      inFlightRequestsRef.current += missingNodes.length;
-      dispatch({
-        type: "set-runtime-stats",
-        stats: { inFlightRequests: inFlightRequestsRef.current },
-      });
-      if (tileCacheRef.current.size === 0) {
-        dispatch({ type: "set-status", status: "loading", error: null });
+      const hasMissing = selectedNodes.some(
+        (node) => !tileServiceRef.current.has(nodeKey(node.nodeId))
+      );
+      if (!hasMissing) {
+        dispatch({
+          type: "set-runtime-stats",
+          stats: {
+            lastSelectionUpdateMs: Math.round(
+              performance.now() - selectionStart
+            ),
+          },
+        });
+        dispatch({ type: "set-status", status: "ready", error: null });
+        return;
       }
 
-      loadTilesForNodes(manifest, missingNodes)
-        .then((tiles) => {
+      dispatch({ type: "set-status", status: "loading", error: null });
+
+      const loadId = datasetLoadIdRef.current;
+      const tilePromises = selectedNodes.map((node) =>
+        tileServiceRef.current.getTile(
+          manifest,
+          node,
+          budgets.cpuCacheBudgetBytes
+        )
+      );
+      const inFlightStats = tileServiceRef.current.stats();
+      dispatch({
+        type: "set-runtime-stats",
+        stats: { inFlightRequests: inFlightStats.inFlight },
+      });
+
+      Promise.allSettled(tilePromises)
+        .then((results) => {
           if (datasetLoadIdRef.current !== loadId) return;
-          tiles.forEach((tile) => tileCacheRef.current.set(tile.id, tile));
-          inFlightRequestsRef.current = Math.max(
-            0,
-            inFlightRequestsRef.current - missingNodes.length
+          if (selectionRunIdRef.current !== selectionRunId) return;
+
+          const failures = results.filter(
+            (result) => result.status === "rejected"
           );
-          const merged = buildRenderData(
-            manifest,
-            Array.from(tileCacheRef.current.values())
+          const hardFailures = failures.filter(
+            (result) =>
+              result.status === "rejected" &&
+              !isAbortError(result.reason)
           );
-          dispatch({ type: "set-render-data", renderData: merged });
-          dispatch({ type: "set-status", status: "ready", error: null });
+
+          if (hardFailures.length > 0) {
+            const message =
+              hardFailures[0].status === "rejected" &&
+              hardFailures[0].reason instanceof Error
+                ? hardFailures[0].reason.message
+                : "Unknown loading error.";
+            dispatch({ type: "set-status", status: "error", error: message });
+          } else {
+            dispatch({ type: "set-status", status: "ready", error: null });
+          }
+
+          const tiles: TileRenderData[] = [];
+          selectedNodes.forEach((node) => {
+            const tile = tileServiceRef.current.getCachedTile(
+              nodeKey(node.nodeId)
+            );
+            if (tile) {
+              tiles.push(tile);
+            }
+          });
+          dispatch({
+            type: "set-render-data",
+            renderData: tiles.length > 0 ? buildRenderData(manifest, tiles) : null,
+          });
+
+          const stats = tileServiceRef.current.stats();
           dispatch({
             type: "set-runtime-stats",
             stats: {
-              loadedTiles: tileCacheRef.current.size,
-              cpuCacheBytes: Array.from(
-                tileCacheRef.current.values()
-              ).reduce(
-                (sum, tile) =>
-                  sum +
-                  tile.positions.byteLength +
-                  (tile.colors?.byteLength ?? 0),
-                0
-              ),
-              inFlightRequests: inFlightRequestsRef.current,
+              loadedTiles: stats.items,
+              cpuCacheBytes: stats.bytes,
+              inFlightRequests: stats.inFlight,
               lastSelectionUpdateMs: Math.round(
                 performance.now() - selectionStart
               ),
             },
           });
         })
-        .catch((error: unknown) => {
+        .catch(() => {
           if (datasetLoadIdRef.current !== loadId) return;
-          pendingKeys.forEach((key) => loadedNodeIdsRef.current.delete(key));
-          inFlightRequestsRef.current = Math.max(
-            0,
-            inFlightRequestsRef.current - missingNodes.length
-          );
-          const message =
-            error instanceof Error ? error.message : "Unknown loading error.";
-          dispatch({ type: "set-status", status: "error", error: message });
+          if (selectionRunIdRef.current !== selectionRunId) return;
+          dispatch({
+            type: "set-status",
+            status: "error",
+            error: "Unknown loading error.",
+          });
+          const stats = tileServiceRef.current.stats();
           dispatch({
             type: "set-runtime-stats",
             stats: {
-              inFlightRequests: inFlightRequestsRef.current,
+              inFlightRequests: stats.inFlight,
               lastSelectionUpdateMs: Math.round(
                 performance.now() - selectionStart
               ),

@@ -1,7 +1,8 @@
 export const fetchRange = async (
   url: string,
   start: number,
-  length: number
+  length: number,
+  signal?: AbortSignal
 ): Promise<ArrayBuffer> => {
   if (start < 0 || length <= 0) {
     throw new Error("Invalid range request.");
@@ -12,6 +13,7 @@ export const fetchRange = async (
     headers: {
       Range: `bytes=${start}-${end}`,
     },
+    signal,
   });
 
   if (!response.ok) {

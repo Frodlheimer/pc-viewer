@@ -87,9 +87,10 @@ const isPct2Tile = (tile: TileManifest) =>
   (tile.url ? tile.url.toLowerCase().endsWith(".pct2") : false);
 
 const loadPct1RenderData = async (
-  tile: TileManifest
+  tile: TileManifest,
+  signal?: AbortSignal
 ): Promise<TileRenderData> => {
-  const data = await loadTile(getTileUrl(tile));
+  const data = await loadTile(getTileUrl(tile), signal);
   return {
     id: tile.id,
     pointCount: data.pointCount,
@@ -101,7 +102,8 @@ const loadPct1RenderData = async (
 
 const loadPct2RenderData = async (
   tile: TileManifest,
-  roles: DatasetRoles
+  roles: DatasetRoles,
+  signal?: AbortSignal
 ): Promise<TileRenderData> => {
   if (tile.containerUrl) {
     if (tile.byteOffset === undefined || tile.byteLength === undefined) {
@@ -113,9 +115,10 @@ const loadPct2RenderData = async (
     ? await loadTileFromContainer(
         tile.containerUrl,
         tile.byteOffset,
-        tile.byteLength
+        tile.byteLength,
+        signal
       )
-    : await loadPct2Tile(getTileUrl(tile));
+    : await loadPct2Tile(getTileUrl(tile), signal);
   const positionName = roles.position;
   const rawPosition = parsed.attributes[positionName];
   if (!rawPosition) {
@@ -175,14 +178,23 @@ const decodePositions = (
   return decoded;
 };
 
+export const loadTileForNode = async (
+  manifest: DatasetManifest,
+  node: NodeRecord,
+  signal?: AbortSignal
+): Promise<TileRenderData> =>
+  loadPct2RenderData(
+    toTileManifestFromNode(node, manifest),
+    manifest.roles,
+    signal
+  );
+
 export const loadTilesForNodes = async (
   manifest: DatasetManifest,
   nodes: NodeRecord[]
 ): Promise<TileRenderData[]> => {
   const tiles = await Promise.all(
-    nodes.map((node) =>
-      loadPct2RenderData(toTileManifestFromNode(node, manifest), manifest.roles)
-    )
+    nodes.map((node) => loadTileForNode(manifest, node))
   );
   return tiles;
 };

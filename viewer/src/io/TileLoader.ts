@@ -51,8 +51,11 @@ export const parseTile = (buffer: ArrayBuffer): TileData => {
   };
 };
 
-export const loadTile = async (url: string): Promise<TileData> => {
-  const response = await fetch(url);
+export const loadTile = async (
+  url: string,
+  signal?: AbortSignal
+): Promise<TileData> => {
+  const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(`Tile load failed (${response.status})`);
   }
