@@ -1,4 +1,4 @@
-import { loadPct2Tile } from "./Pct2TileLoader";
+import { loadPct2TileEager } from "./Pct2TileLoader";
 import type { ParsedTile2 } from "../types/Pct2";
 
 type AttributeSummary = {
@@ -15,7 +15,7 @@ const summarizeAttributes = (tile: ParsedTile2): AttributeSummary[] =>
   }));
 
 export const debugPct2Tile = async (url: string) => {
-  const tile = await loadPct2Tile(url);
+  const tile = await loadPct2TileEager(url);
   const summary = {
     nodeId: tile.nodeId,
     pointCount: tile.pointCount,

@@ -25,6 +25,12 @@ export const VIEWSTATE_DEBOUNCE_MS = 150;
 export const INTERACTION_IDLE_MS = 350;
 // Time to wait after interaction before returning to full quality.
 
+export const MIN_RETAINED_POINTS_INTERACT_DEFAULT = 500_000;
+// Minimum retained points while interacting to avoid blackouts.
+
+export const MIN_IDLE_STABLE_MS_DEFAULT = 250;
+// Idle duration before pruning retained tiles.
+
 export const LOD_HYSTERESIS_FACTOR = 1.25;
 // Hysteresis factor to avoid LOD thrashing when zooming.
 
@@ -35,11 +41,13 @@ export type RuntimeBudgets = {
   maxVisiblePoints: number;
   targetVisiblePoints: number;
   targetVisiblePointsInteract: number;
+  minRetainedPointsInteract: number;
   cpuCacheBudgetBytes: number;
   gpuCacheBudgetBytes: number;
   maxConcurrentRequests: number;
   viewDebounceMs: number;
   interactionIdleMs: number;
+  minIdleStableMs: number;
   lodHysteresisFactor: number;
   profile: Exclude<PerformanceProfile, "auto">;
 };
@@ -55,6 +63,15 @@ const PROFILE_MULTIPLIER: Record<
 
 const clampToDefault = (value: number, base: number) =>
   Math.min(base * 2, Math.max(base * 0.25, value));
+
+const MIN_RETAINED_POINTS_BY_PROFILE: Record<
+  Exclude<PerformanceProfile, "auto">,
+  number
+> = {
+  low: 300_000,
+  balanced: MIN_RETAINED_POINTS_INTERACT_DEFAULT,
+  high: 800_000,
+};
 
 const resolveProfile = (profile: PerformanceProfile): Exclude<PerformanceProfile, "auto"> => {
   if (profile !== "auto") {
@@ -103,6 +120,12 @@ export const getRuntimeBudgets = (
       TARGET_VISIBLE_POINTS_INTERACT_DEFAULT
     )
   );
+  const minRetainedPointsInteract = Math.round(
+    clampToDefault(
+      MIN_RETAINED_POINTS_BY_PROFILE[resolvedProfile],
+      MIN_RETAINED_POINTS_INTERACT_DEFAULT
+    )
+  );
 
   return {
     profile: resolvedProfile,
@@ -113,6 +136,7 @@ export const getRuntimeBudgets = (
       targetVisiblePointsInteract,
       maxVisiblePoints
     ),
+    minRetainedPointsInteract,
     cpuCacheBudgetBytes: clampToDefault(
       CPU_TILE_CACHE_BUDGET_BYTES_DEFAULT * scale,
       CPU_TILE_CACHE_BUDGET_BYTES_DEFAULT
@@ -134,6 +158,7 @@ export const getRuntimeBudgets = (
       clampToDefault(viewDebounceMs, VIEWSTATE_DEBOUNCE_MS)
     ),
     interactionIdleMs: INTERACTION_IDLE_MS,
+    minIdleStableMs: MIN_IDLE_STABLE_MS_DEFAULT,
     lodHysteresisFactor: LOD_HYSTERESIS_FACTOR,
   };
 };

@@ -11,12 +11,32 @@ import type {
   TileBounds,
   TileRenderData,
 } from "../types/Tile";
+import type { CachedTileEntry, TileSource } from "../types/TileCache";
 import { getBoundsCenter } from "../utils/bounds";
 import type { NodeRecord } from "../types/Hierarchy";
 import { loadTile } from "./TileLoader";
-import { loadPct2Tile } from "./Pct2TileLoader";
-import { loadTileFromContainer } from "./TileContainerLoader";
-import type { TypedArray } from "../types/Pct2";
+import {
+  decodePct2Mandatory as decodePct2MandatoryAttributes,
+  loadPct2TileBuffer,
+  parsePct2HeaderAndDirectory,
+} from "./Pct2TileLoader";
+import { loadTileBufferFromContainer } from "./TileContainerLoader";
+import { keyFromNodeId } from "../utils/nodeKey";
+
+const hashStringToNodeId = (value: string): number => {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
+const resolveNodeId = (
+  tile: TileManifest,
+  fallback?: bigint | number
+): bigint | number =>
+  tile.nodeId ?? fallback ?? hashStringToNodeId(tile.id);
 
 const toTileBounds = (bounds: Bounds): TileBounds => {
   const [minX, minY, minZ, maxX, maxY, maxZ] = bounds;
@@ -91,8 +111,10 @@ const loadPct1RenderData = async (
   signal?: AbortSignal
 ): Promise<TileRenderData> => {
   const data = await loadTile(getTileUrl(tile), signal);
+  const nodeId = resolveNodeId(tile);
   return {
     id: tile.id,
+    nodeId,
     pointCount: data.pointCount,
     positions: data.positions,
     colors: data.colors,
@@ -100,90 +122,107 @@ const loadPct1RenderData = async (
   };
 };
 
+const loadPct2Buffer = async (
+  tile: TileManifest,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> => {
+  if (tile.containerUrl) {
+    if (tile.byteOffset === undefined || tile.byteLength === undefined) {
+      throw new Error("Tile container reference missing byte range.");
+    }
+    return loadTileBufferFromContainer(
+      tile.containerUrl,
+      tile.byteOffset,
+      tile.byteLength,
+      signal,
+      { nodeId: tile.nodeId, tileId: tile.id }
+    );
+  }
+  return loadPct2TileBuffer(getTileUrl(tile), signal);
+};
+
+const decodePct2MandatoryData = (
+  buffer: ArrayBuffer,
+  tile: TileManifest,
+  roles: DatasetRoles
+) => {
+  const { header, directory } = parsePct2HeaderAndDirectory(buffer);
+  const mandatory = decodePct2MandatoryAttributes(buffer, directory, {
+    positionName: roles.position,
+    colorName: roles.color ?? "rgb",
+    allowMissingColor: !roles.color,
+  });
+
+  const nodeId = resolveNodeId(tile, header.nodeId);
+  const renderData: TileRenderData = {
+    id: tile.id,
+    nodeId,
+    pointCount: header.pointCount,
+    positions: mandatory.positions,
+    colors: mandatory.colors,
+    origin: header.origin,
+    bounds: toTileBounds(tile.bounds),
+  };
+
+  return { renderData, directory, header };
+};
+
+const getTileSource = (tile: TileManifest, format: "pct1" | "pct2"): TileSource => {
+  if (format === "pct1") {
+    return { format, url: getTileUrl(tile) };
+  }
+  if (tile.containerUrl) {
+    return {
+      format,
+      containerUrl: tile.containerUrl,
+      byteOffset: tile.byteOffset,
+      byteLength: tile.byteLength,
+    };
+  }
+  return { format, url: getTileUrl(tile) };
+};
+
 const loadPct2RenderData = async (
   tile: TileManifest,
   roles: DatasetRoles,
   signal?: AbortSignal
 ): Promise<TileRenderData> => {
-  if (tile.containerUrl) {
-    if (tile.byteOffset === undefined || tile.byteLength === undefined) {
-      throw new Error("Tile container reference missing byte range.");
-    }
-  }
-
-  const parsed = tile.containerUrl
-    ? await loadTileFromContainer(
-        tile.containerUrl,
-        tile.byteOffset,
-        tile.byteLength,
-        signal
-      )
-    : await loadPct2Tile(getTileUrl(tile), signal);
-  const positionName = roles.position;
-  const rawPosition = parsed.attributes[positionName];
-  if (!rawPosition) {
-    throw new Error(`PCT2 tile missing position attribute (${positionName}).`);
-  }
-
-  const expectedPositions = parsed.pointCount * 3;
-  const positions = decodePositions(rawPosition, expectedPositions, parsed.scale);
-
-  const colorName = roles.color ?? "rgb";
-  const rawColor = parsed.attributes[colorName];
-  if (roles.color && !rawColor) {
-    throw new Error(`PCT2 tile missing color attribute (${colorName}).`);
-  }
-  const colors = rawColor instanceof Uint8Array ? rawColor : undefined;
-  if (colors && colors.length < parsed.pointCount * 3) {
-    throw new Error("PCT2 rgb attribute truncated.");
-  }
-
-  return {
-    id: tile.id,
-    nodeId: tile.nodeId ?? parsed.nodeId,
-    pointCount: parsed.pointCount,
-    positions,
-    colors,
-    origin: parsed.origin,
-    bounds: toTileBounds(tile.bounds),
-  };
+  const buffer = await loadPct2Buffer(tile, signal);
+  const { renderData } = decodePct2MandatoryData(buffer, tile, roles);
+  return renderData;
 };
 
-const decodePositions = (
-  attribute: TypedArray,
-  expectedLength: number,
-  scale: [number, number, number]
-): Float32Array => {
-  if (attribute instanceof Float32Array) {
-    if (attribute.length < expectedLength) {
-      throw new Error("PCT2 position attribute truncated.");
-    }
-    return attribute;
+const loadPct2TileEntry = async (
+  tile: TileManifest,
+  roles: DatasetRoles,
+  signal?: AbortSignal
+): Promise<CachedTileEntry> => {
+  const buffer = await loadPct2Buffer(tile, signal);
+  const { renderData, directory } = decodePct2MandatoryData(
+    buffer,
+    tile,
+    roles
+  );
+  if (renderData.nodeId === undefined) {
+    throw new Error("PCT2 tile missing nodeId.");
   }
-
-  if (!(attribute instanceof Int32Array)) {
-    throw new Error("PCT2 position attribute must be int32x3.");
-  }
-
-  if (attribute.length < expectedLength) {
-    throw new Error("PCT2 position attribute truncated.");
-  }
-
-  const decoded = new Float32Array(expectedLength);
-  for (let i = 0; i < expectedLength; i += 3) {
-    decoded[i] = attribute[i] * scale[0];
-    decoded[i + 1] = attribute[i + 1] * scale[1];
-    decoded[i + 2] = attribute[i + 2] * scale[2];
-  }
-  return decoded;
+  const nodeKey = keyFromNodeId(renderData.nodeId);
+  return {
+    key: nodeKey,
+    renderData,
+    directory,
+    rawBuffer: buffer,
+    decodedOptional: new Map(),
+    source: getTileSource(tile, "pct2"),
+  };
 };
 
 export const loadTileForNode = async (
   manifest: DatasetManifest,
   node: NodeRecord,
   signal?: AbortSignal
-): Promise<TileRenderData> =>
-  loadPct2RenderData(
+): Promise<CachedTileEntry> =>
+  loadPct2TileEntry(
     toTileManifestFromNode(node, manifest),
     manifest.roles,
     signal
@@ -192,12 +231,8 @@ export const loadTileForNode = async (
 export const loadTilesForNodes = async (
   manifest: DatasetManifest,
   nodes: NodeRecord[]
-): Promise<TileRenderData[]> => {
-  const tiles = await Promise.all(
-    nodes.map((node) => loadTileForNode(manifest, node))
-  );
-  return tiles;
-};
+): Promise<CachedTileEntry[]> =>
+  Promise.all(nodes.map((node) => loadTileForNode(manifest, node)));
 
 const loadTilesForManifestTiles = async (
   manifest: DatasetManifest

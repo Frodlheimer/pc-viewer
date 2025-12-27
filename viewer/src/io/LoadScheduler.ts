@@ -3,6 +3,7 @@ import type { NodeRecord } from "../types/Hierarchy";
 import type { TileRenderData } from "../types/Tile";
 import type { SelectedNode } from "./NodeSelector";
 import { TileService, isAbortError } from "./TileService";
+import { keyFromNodeId } from "../utils/nodeKey";
 
 export type DesiredNode = SelectedNode;
 
@@ -123,9 +124,6 @@ export type LoadSchedulerOptions = {
   onError?: (error: unknown) => void;
 };
 
-const nodeKey = (nodeId: NodeRecord["nodeId"]) =>
-  typeof nodeId === "bigint" ? nodeId.toString() : String(nodeId);
-
 export class LoadScheduler {
   private tileService: TileService;
   private getManifest: () => DatasetManifest | null;
@@ -154,12 +152,14 @@ export class LoadScheduler {
   }
 
   setDesiredNodes(nodes: DesiredNode[]) {
-    this.desiredKeys = new Set(nodes.map((entry) => nodeKey(entry.node.nodeId)));
+    this.desiredKeys = new Set(
+      nodes.map((entry) => keyFromNodeId(entry.node.nodeId))
+    );
     this.prefetchKeys.clear();
     this.desiredQueue.clear();
     this.prefetchQueue.clear();
     nodes.forEach((entry) => {
-      const key = nodeKey(entry.node.nodeId);
+      const key = keyFromNodeId(entry.node.nodeId);
       if (this.tileService.has(key) || this.tileService.isInFlight(key)) {
         return;
       }
@@ -176,11 +176,11 @@ export class LoadScheduler {
 
   setPrefetchNodes(nodes: DesiredNode[]) {
     this.prefetchKeys = new Set(
-      nodes.map((entry) => nodeKey(entry.node.nodeId))
+      nodes.map((entry) => keyFromNodeId(entry.node.nodeId))
     );
     this.prefetchQueue.clear();
     nodes.forEach((entry) => {
-      const key = nodeKey(entry.node.nodeId);
+      const key = keyFromNodeId(entry.node.nodeId);
       if (
         this.desiredKeys.has(key) ||
         this.tileService.has(key) ||

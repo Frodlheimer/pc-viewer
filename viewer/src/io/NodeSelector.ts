@@ -3,6 +3,7 @@ import type { RuntimeBudgets } from "../config/budgets";
 import type { BoundsQuantization } from "../types/Dataset";
 import type { NodeRecord } from "../types/Hierarchy";
 import type { Vec3 } from "../types/Point";
+import { keyFromNodeId } from "../utils/nodeKey";
 
 type Plane = {
   normal: Vec3;
@@ -64,9 +65,6 @@ type NodeInfo = {
 
 const BASE_REFINE_PX = 40;
 const BASE_COARSEN_PX = 30;
-
-const nodeKey = (nodeId: NodeRecord["nodeId"]) =>
-  typeof nodeId === "bigint" ? nodeId.toString() : String(nodeId);
 
 const normalizePlane = (a: number, b: number, c: number, d: number): Plane => {
   const length = Math.hypot(a, b, c);
@@ -308,11 +306,11 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
   const nodeMap = new Map<string, NodeRecord>();
   const childrenByParent = new Map<string, NodeRecord[]>();
   for (const node of input.nodes) {
-    nodeMap.set(nodeKey(node.nodeId), node);
+    nodeMap.set(keyFromNodeId(node.nodeId), node);
   }
   for (const node of input.nodes) {
-    const parentKey = nodeKey(node.parentId);
-    if (nodeMap.has(parentKey) && parentKey !== nodeKey(node.nodeId)) {
+    const parentKey = keyFromNodeId(node.parentId);
+    if (nodeMap.has(parentKey) && parentKey !== keyFromNodeId(node.nodeId)) {
       const list = childrenByParent.get(parentKey) ?? [];
       list.push(node);
       childrenByParent.set(parentKey, list);
@@ -320,13 +318,13 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
   }
 
   const roots = input.nodes.filter((node) => {
-    const parentKey = nodeKey(node.parentId);
-    return !nodeMap.has(parentKey) || parentKey === nodeKey(node.nodeId);
+    const parentKey = keyFromNodeId(node.parentId);
+    return !nodeMap.has(parentKey) || parentKey === keyFromNodeId(node.nodeId);
   });
 
   const infoCache = new Map<string, NodeInfo>();
   const getInfo = (node: NodeRecord): NodeInfo => {
-    const key = nodeKey(node.nodeId);
+    const key = keyFromNodeId(node.nodeId);
     const cached = infoCache.get(key);
     if (cached) {
       return cached;
@@ -391,7 +389,7 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
       continue;
     }
 
-    const key = nodeKey(node.nodeId);
+    const key = keyFromNodeId(node.nodeId);
     const children = info.children;
     const hasChildren = children.length > 0;
     let shouldRefine = false;
@@ -408,7 +406,7 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
         keptPrevious = true;
       } else {
         const anyChildSelected = children.some((child) =>
-          input.previousSelection?.has(nodeKey(child.nodeId))
+          input.previousSelection?.has(keyFromNodeId(child.nodeId))
         );
         shouldRefine = anyChildSelected;
       }

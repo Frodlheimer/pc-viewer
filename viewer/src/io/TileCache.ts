@@ -1,8 +1,16 @@
-import type { TileRenderData } from "../types/Tile";
+import type { CachedTileEntry } from "../types/TileCache";
+
+export type TileCacheEntrySnapshot = {
+  key: string;
+  tile: CachedTileEntry;
+  bytesEstimate: number;
+  pinned: boolean;
+  lastUsed: number;
+};
 
 type CacheEntry = {
   key: string;
-  tile: TileRenderData;
+  tile: CachedTileEntry;
   bytesEstimate: number;
   pinned: boolean;
   lastUsed: number;
@@ -21,7 +29,7 @@ export class TileCache {
   private pinnedItems = 0;
   private lastPinnedWarning = 0;
 
-  get(key: string): TileRenderData | undefined {
+  get(key: string): CachedTileEntry | undefined {
     const entry = this.entries.get(key);
     if (!entry) {
       return undefined;
@@ -35,7 +43,7 @@ export class TileCache {
     return this.entries.has(key);
   }
 
-  set(key: string, tile: TileRenderData, bytesEstimate: number): void {
+  set(key: string, tile: CachedTileEntry, bytesEstimate: number): void {
     const normalizedBytes = Math.max(0, Math.floor(bytesEstimate));
     const now = Date.now();
     const existing = this.entries.get(key);
@@ -118,6 +126,20 @@ export class TileCache {
       pinnedItems: this.pinnedItems,
       pinnedBytes: this.pinnedBytes,
     };
+  }
+
+  values(): CachedTileEntry[] {
+    return Array.from(this.entries.values(), (entry) => entry.tile);
+  }
+
+  getEntries(): TileCacheEntrySnapshot[] {
+    return Array.from(this.entries.values(), (entry) => ({
+      key: entry.key,
+      tile: entry.tile,
+      bytesEstimate: entry.bytesEstimate,
+      pinned: entry.pinned,
+      lastUsed: entry.lastUsed,
+    }));
   }
 
   clear(): void {

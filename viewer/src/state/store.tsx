@@ -36,18 +36,31 @@ export type AddedPointsPatch = {
 
 export type PatchState = {
   addedPoints: AddedPointsPatch;
-  deleted: Map<string, Uint8Array | boolean[]>;
+  deleted: Map<string, Uint8Array>;
   updatedAttributes: Map<string, Map<number, Record<string, number>>>;
 };
 
 export type RuntimeStats = {
+  desiredNodes: number;
   selectedNodes: number;
+  retainedNodes: number;
+  retainedPoints: number;
   visiblePoints: number;
   loadedTiles: number;
+  renderedTiles: number;
+  lastNonEmptyTiles: number;
+  zeroTileWarnings: number;
   cpuCacheBytes: number;
+  pinnedTiles: number;
+  pinnedBytes: number;
   inFlightRequests: number;
   queuedRequests: number;
+  rawBufferRetainedCount: number;
+  optionalAttrsDecodedCount: number;
+  rawBufferDroppedOnPressureCount: number;
+  rawBufferBytesDropped: number;
   lastSelectionUpdateMs: number | null;
+  lastInteractionMs: number | null;
   isInteracting: boolean;
   targetVisiblePoints: number;
   rangeCache: {
@@ -73,12 +86,21 @@ export type HoverInfo = {
   color?: Vec3;
 };
 
-export type SelectionInfo = {
-  tileId: string;
-  nodeId?: bigint | number;
-  indexWithinTile: number;
-  worldPosition: Vec3;
-  color?: Vec3;
+export type SelectionItem = {
+  nodeId: string;
+  index: number;
+  worldPos: Vec3;
+  tileKey?: string;
+};
+
+export type SelectionState = {
+  items: SelectionItem[];
+};
+
+export type MeasurementState = {
+  a?: SelectionItem;
+  b?: SelectionItem;
+  distance?: number;
 };
 
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
@@ -88,10 +110,12 @@ export type AppState = {
   viewStateDatasetId: string | null;
   editMode: EditMode;
   patches: PatchState;
+  deleteSelectionRequestId: number;
   settings: AppSettings;
   runtimeStats: RuntimeStats;
   hover: HoverInfo | null;
-  selection: SelectionInfo | null;
+  selection: SelectionState;
+  measurement: MeasurementState;
   activeDatasetId: string;
   renderData: RenderData | null;
   status: LoadStatus;
@@ -103,10 +127,13 @@ type AppAction =
   | { type: "set-view-state"; viewState: ViewState }
   | { type: "initialize-view-state"; datasetId: string; bounds: Bounds }
   | { type: "set-edit-mode"; mode: EditMode }
+  | { type: "set-deleted-masks"; deleted: Map<string, Uint8Array> }
+  | { type: "request-delete-selection" }
   | { type: "set-settings"; settings: Partial<AppSettings> }
   | { type: "set-runtime-stats"; stats: Partial<RuntimeStats> }
   | { type: "set-hover"; hover: HoverInfo | null }
-  | { type: "set-selection"; selection: SelectionInfo | null }
+  | { type: "set-selection"; selection: SelectionState }
+  | { type: "set-measurement"; measurement: MeasurementState }
   | { type: "set-active-dataset"; datasetId: string }
   | { type: "set-render-data"; renderData: RenderData | null }
   | { type: "set-status"; status: LoadStatus; error?: string | null }
@@ -128,18 +155,32 @@ const initialState: AppState = {
     deleted: new Map(),
     updatedAttributes: new Map(),
   },
+  deleteSelectionRequestId: 0,
   settings: {
     performanceProfile: "auto",
     debugEnabled: false,
   },
   runtimeStats: {
+    desiredNodes: 0,
     selectedNodes: 0,
+    retainedNodes: 0,
+    retainedPoints: 0,
     visiblePoints: 0,
     loadedTiles: 0,
+    renderedTiles: 0,
+    lastNonEmptyTiles: 0,
+    zeroTileWarnings: 0,
     cpuCacheBytes: 0,
+    pinnedTiles: 0,
+    pinnedBytes: 0,
     inFlightRequests: 0,
     queuedRequests: 0,
+    rawBufferRetainedCount: 0,
+    optionalAttrsDecodedCount: 0,
+    rawBufferDroppedOnPressureCount: 0,
+    rawBufferBytesDropped: 0,
     lastSelectionUpdateMs: null,
+    lastInteractionMs: null,
     isInteracting: false,
     targetVisiblePoints: 0,
     rangeCache: {
@@ -151,7 +192,8 @@ const initialState: AppState = {
     },
   },
   hover: null,
-  selection: null,
+  selection: { items: [] },
+  measurement: {},
   activeDatasetId: "demo",
   renderData: null,
   status: "idle",
@@ -181,6 +223,16 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
     }
     case "set-edit-mode":
       return { ...state, editMode: action.mode };
+    case "set-deleted-masks":
+      return {
+        ...state,
+        patches: { ...state.patches, deleted: action.deleted },
+      };
+    case "request-delete-selection":
+      return {
+        ...state,
+        deleteSelectionRequestId: state.deleteSelectionRequestId + 1,
+      };
     case "set-settings":
       return {
         ...state,
@@ -195,6 +247,8 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
       return { ...state, hover: action.hover };
     case "set-selection":
       return { ...state, selection: action.selection };
+    case "set-measurement":
+      return { ...state, measurement: action.measurement };
     case "set-active-dataset":
       return { ...state, activeDatasetId: action.datasetId };
     case "set-render-data":

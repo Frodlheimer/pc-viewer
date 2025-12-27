@@ -1,13 +1,82 @@
+import { getRuntimeBudgets } from "../config/budgets";
 import { useAppStore } from "../state/store";
 import { DATASETS } from "../types/Dataset";
+import { keyFromNodeId } from "../utils/nodeKey";
 
 export const Sidebar = () => {
   const { state, dispatch } = useAppStore();
   const { renderData, status, error, hover, selection, settings, runtimeStats } =
     state;
+  const primarySelection = selection.items[0];
+  const hoverTileEntry =
+    settings.debugEnabled &&
+    hover?.nodeId !== undefined &&
+    typeof window !== "undefined"
+      ? (window as { __tileService?: { getCachedEntry: (key: string) => unknown } })
+          .__tileService?.getCachedEntry(keyFromNodeId(hover.nodeId))
+      : null;
+  const hoverEntryWithMeta =
+    hoverTileEntry &&
+    typeof hoverTileEntry === "object" &&
+    "rawBuffer" in hoverTileEntry
+      ? (hoverTileEntry as { rawBuffer?: ArrayBuffer; decodedOptional?: Map<string, unknown> })
+      : null;
   const addedCount = Math.floor(
     state.patches.addedPoints.positions.length / 3
   );
+  const totalDeletedCount = settings.debugEnabled
+    ? Array.from(state.patches.deleted.values()).reduce((sum, mask) => {
+        let count = 0;
+        for (let i = 0; i < mask.length; i += 1) {
+          if (mask[i] === 1) {
+            count += 1;
+          }
+        }
+        return sum + count;
+      }, 0)
+    : 0;
+
+  const handleSnapshot = () => {
+    const budgets = getRuntimeBudgets(settings.performanceProfile);
+    console.info({
+      profile: settings.performanceProfile,
+      resolvedProfile: budgets.profile,
+      budgets,
+      selection: {
+        desiredNodes: runtimeStats.desiredNodes,
+        selectedNodes: runtimeStats.selectedNodes,
+        retainedNodes: runtimeStats.retainedNodes,
+        retainedPoints: runtimeStats.retainedPoints,
+        visiblePoints: runtimeStats.visiblePoints,
+        targetVisiblePoints: runtimeStats.targetVisiblePoints,
+        isInteracting: runtimeStats.isInteracting,
+      },
+      tiles: {
+        loadedTiles: runtimeStats.loadedTiles,
+        renderedTiles: runtimeStats.renderedTiles,
+        lastNonEmptyTiles: runtimeStats.lastNonEmptyTiles,
+        zeroTileWarnings: runtimeStats.zeroTileWarnings,
+      },
+      tileCache: {
+        items: runtimeStats.loadedTiles,
+        bytes: runtimeStats.cpuCacheBytes,
+        pinnedItems: runtimeStats.pinnedTiles,
+        pinnedBytes: runtimeStats.pinnedBytes,
+        rawBufferRetainedCount: runtimeStats.rawBufferRetainedCount,
+        optionalAttrsDecodedCount: runtimeStats.optionalAttrsDecodedCount,
+        rawBufferDroppedOnPressureCount:
+          runtimeStats.rawBufferDroppedOnPressureCount,
+        rawBufferBytesDropped: runtimeStats.rawBufferBytesDropped,
+      },
+      rangeWindowCache: runtimeStats.rangeCache,
+      scheduler: {
+        queued: runtimeStats.queuedRequests,
+        inFlight: runtimeStats.inFlightRequests,
+      },
+      lastSelectionUpdateMs: runtimeStats.lastSelectionUpdateMs,
+      lastInteractionMs: runtimeStats.lastInteractionMs,
+    });
+  };
 
   return (
     <div className="sidebar">
@@ -52,6 +121,16 @@ export const Sidebar = () => {
             {hover.nodeId !== undefined && (
               <div className="sidebar-meta">Node: {hover.nodeId.toString()}</div>
             )}
+            {settings.debugEnabled && hoverEntryWithMeta && (
+              <>
+                <div className="sidebar-meta">
+                  RawBuffer: {hoverEntryWithMeta.rawBuffer ? "yes" : "no"}
+                </div>
+                <div className="sidebar-meta">
+                  Optional Attrs: {hoverEntryWithMeta.decodedOptional?.size ?? 0}
+                </div>
+              </>
+            )}
           </>
         ) : (
           <div className="sidebar-meta">None</div>
@@ -60,24 +139,81 @@ export const Sidebar = () => {
 
       <div className="sidebar-section">
         <div className="sidebar-title">Selection</div>
-        {selection ? (
+        {selection.items.length > 0 ? (
           <>
-            <div className="sidebar-meta">Tile: {selection.tileId}</div>
             <div className="sidebar-meta">
-              Index: {selection.indexWithinTile}
+              Selected: {selection.items.length}
             </div>
-            <div className="sidebar-meta">
-              Pos:{" "}
-              {selection.worldPosition.map((value) => value.toFixed(2)).join(", ")}
-            </div>
-            {selection.nodeId !== undefined && (
-              <div className="sidebar-meta">
-                Node: {selection.nodeId.toString()}
-              </div>
+            {primarySelection && (
+              <>
+                <div className="sidebar-meta">
+                  Node: {primarySelection.nodeId}
+                </div>
+                <div className="sidebar-meta">
+                  Index: {primarySelection.index}
+                </div>
+                <div className="sidebar-meta">
+                  Pos:{" "}
+                  {primarySelection.worldPos
+                    .map((value) => value.toFixed(2))
+                    .join(", ")}
+                </div>
+              </>
             )}
           </>
         ) : (
           <div className="sidebar-meta">None</div>
+        )}
+        <div className="sidebar-meta">
+          Tip: Click selects a point. Shift+Drag draws a selection rectangle.
+        </div>
+        <button
+          type="button"
+          className="sidebar-button"
+          disabled={selection.items.length === 0}
+          onClick={() =>
+            dispatch({ type: "set-selection", selection: { items: [] } })
+          }
+        >
+          Clear Selection
+        </button>
+        {state.editMode === "delete" && (
+          <button
+            type="button"
+            className="sidebar-button"
+            disabled={selection.items.length === 0}
+            onClick={() => dispatch({ type: "request-delete-selection" })}
+          >
+            Delete Selection
+          </button>
+        )}
+      </div>
+
+      <div className="sidebar-section">
+        <div className="sidebar-title">Measure</div>
+        {state.measurement.a ? (
+          <>
+            <div className="sidebar-meta">
+              A: {state.measurement.a.worldPos.map((value) => value.toFixed(2)).join(", ")}
+            </div>
+            {state.measurement.b ? (
+              <>
+                <div className="sidebar-meta">
+                  B: {state.measurement.b.worldPos.map((value) => value.toFixed(2)).join(", ")}
+                </div>
+                <div className="sidebar-meta">
+                  Distance:{" "}
+                  {state.measurement.distance !== undefined
+                    ? `${state.measurement.distance.toFixed(2)} world units`
+                    : "n/a"}
+                </div>
+              </>
+            ) : (
+              <div className="sidebar-meta">B: not set</div>
+            )}
+          </>
+        ) : (
+          <div className="sidebar-meta">Click to set A (then click B)</div>
         )}
       </div>
 
@@ -130,11 +266,27 @@ export const Sidebar = () => {
         </label>
         {settings.debugEnabled && (
           <>
+            <button
+              type="button"
+              className="sidebar-button"
+              onClick={handleSnapshot}
+            >
+              Snapshot Metrics
+            </button>
             <div className="sidebar-meta">
               Interacting: {runtimeStats.isInteracting ? "yes" : "no"}
             </div>
             <div className="sidebar-meta">
               Target Points: {runtimeStats.targetVisiblePoints.toLocaleString()}
+            </div>
+            <div className="sidebar-meta">
+              Desired Nodes: {runtimeStats.desiredNodes}
+            </div>
+            <div className="sidebar-meta">
+              Retained Nodes: {runtimeStats.retainedNodes}
+            </div>
+            <div className="sidebar-meta">
+              Retained Points: {runtimeStats.retainedPoints.toLocaleString()}
             </div>
             <div className="sidebar-meta">
               Selected Nodes: {runtimeStats.selectedNodes}
@@ -146,7 +298,38 @@ export const Sidebar = () => {
               Loaded Tiles: {runtimeStats.loadedTiles}
             </div>
             <div className="sidebar-meta">
+              Rendered Tiles: {runtimeStats.renderedTiles}
+            </div>
+            <div className="sidebar-meta">
+              Last Non-Empty Tiles: {runtimeStats.lastNonEmptyTiles}
+            </div>
+            <div className="sidebar-meta">
+              Zero Tile Warnings: {runtimeStats.zeroTileWarnings}
+            </div>
+            <div className="sidebar-meta">
+              Deleted Points: {totalDeletedCount.toLocaleString()}
+            </div>
+            <div className="sidebar-meta">
               CPU Cache: {runtimeStats.cpuCacheBytes.toLocaleString()} bytes
+            </div>
+            <div className="sidebar-meta">
+              Pinned Tiles: {runtimeStats.pinnedTiles}
+            </div>
+            <div className="sidebar-meta">
+              Pinned Bytes: {runtimeStats.pinnedBytes.toLocaleString()} bytes
+            </div>
+            <div className="sidebar-meta">
+              Raw Buffers: {runtimeStats.rawBufferRetainedCount}
+            </div>
+            <div className="sidebar-meta">
+              Optional Attrs: {runtimeStats.optionalAttrsDecodedCount}
+            </div>
+            <div className="sidebar-meta">
+              Dropped Raw Buffers: {runtimeStats.rawBufferDroppedOnPressureCount}
+            </div>
+            <div className="sidebar-meta">
+              Dropped Raw Bytes:{" "}
+              {runtimeStats.rawBufferBytesDropped.toLocaleString()}
             </div>
             <div className="sidebar-meta">
               Range Windows: {runtimeStats.rangeCache.totalWindows}
@@ -171,6 +354,12 @@ export const Sidebar = () => {
               Last Selection:{" "}
               {runtimeStats.lastSelectionUpdateMs !== null
                 ? `${runtimeStats.lastSelectionUpdateMs} ms`
+                : "n/a"}
+            </div>
+            <div className="sidebar-meta">
+              Last Interaction:{" "}
+              {runtimeStats.lastInteractionMs !== null
+                ? `${runtimeStats.lastInteractionMs} ms`
                 : "n/a"}
             </div>
           </>

@@ -1,4 +1,6 @@
 import { PointCloudLayer } from "@deck.gl/layers";
+import { DataFilterExtension } from "@deck.gl/extensions";
+import type { DataFilterExtensionProps } from "@deck.gl/extensions";
 import type { PickingInfo } from "@deck.gl/core";
 import type { TileRenderData } from "../types/Tile";
 
@@ -7,12 +9,13 @@ type BinaryAttributes = {
   attributes: {
     getPosition: { value: Float32Array; size: 3 };
     getColor?: { value: Uint8Array; size: 3; normalized: true };
+    getFilterValue?: { value: Uint8Array; size: 1; normalized?: boolean };
   };
 };
 
 export type PointCloudCallbacks = {
-  onHover: (info: PickingInfo) => void;
-  onClick: (info: PickingInfo) => void;
+  onHover: (info: PickingInfo, event?: unknown) => void;
+  onClick: (info: PickingInfo, event?: unknown) => void;
 };
 
 export type PointCloudLayerOptions = {
@@ -20,6 +23,8 @@ export type PointCloudLayerOptions = {
   pickable?: boolean;
   autoHighlight?: boolean;
   pointSize?: number;
+  filterValues?: Uint8Array;
+  filterVersion?: number;
 };
 
 export const createPointCloudLayer = (
@@ -38,6 +43,14 @@ export const createPointCloudLayer = (
       normalized: true,
     };
   }
+  const filterValues = options.filterValues;
+  if (filterValues) {
+    attributes.getFilterValue = {
+      value: filterValues,
+      size: 1,
+      normalized: false,
+    };
+  }
 
   const data: BinaryAttributes = {
     length: tile.pointCount,
@@ -45,13 +58,29 @@ export const createPointCloudLayer = (
   };
 
   const pickable = options.pickable ?? true;
-  return new PointCloudLayer<BinaryAttributes>({
+  const filterTrigger = filterValues
+    ? options.filterVersion ?? filterValues
+    : undefined;
+  const extensions = filterValues
+    ? [new DataFilterExtension({ filterSize: 1 })]
+    : [];
+  return new PointCloudLayer<
+    BinaryAttributes,
+    DataFilterExtensionProps<BinaryAttributes>
+  >({
     id: options.id,
     data,
     pickable,
     autoHighlight: options.autoHighlight ?? pickable,
     pointSize: options.pointSize ?? 2,
-    onHover: callbacks.onHover,
-    onClick: callbacks.onClick,
+    getFilterValue: filterValues
+      ? (_d, info) => filterValues[info.index] ?? 1
+      : undefined,
+    filterEnabled: Boolean(filterValues),
+    filterRange: filterValues ? [0.5, 1.5] : undefined,
+    extensions,
+    updateTriggers: filterTrigger ? { getFilterValue: filterTrigger } : undefined,
+    onHover: (info, event) => callbacks.onHover(info, event),
+    onClick: (info, event) => callbacks.onClick(info, event),
   });
 };

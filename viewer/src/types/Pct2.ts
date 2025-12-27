@@ -30,6 +30,37 @@ export type TypedArray =
   | Float32Array
   | Float64Array;
 
+export type Pct2Header = {
+  magic: string;
+  version: number;
+  headerBytes: number;
+  nodeId: bigint | number;
+  pointCount: number;
+  flags: number;
+  origin: [number, number, number];
+  scale: [number, number, number];
+  attrCount: number;
+  payloadStart: number;
+};
+
+export type Pct2AttributeDirectoryEntry = {
+  name: string;
+  type: AttributeTypeEnum;
+  components: number;
+  codec: CodecEnum;
+  normalized: 0 | 1;
+  byteOffset: number;
+  byteLength: number;
+  uncompressedByteLength: number;
+  payloadOffset: number;
+};
+
+export type Pct2Directory = {
+  header: Pct2Header;
+  attributes: Pct2AttributeDirectoryEntry[];
+  byName: Record<string, Pct2AttributeDirectoryEntry>;
+};
+
 export type ParsedTile2 = {
   nodeId: bigint | number;
   pointCount: number;

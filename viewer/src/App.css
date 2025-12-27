@@ -121,6 +121,22 @@
   font-size: 12px;
 }
 
+.sidebar-button {
+  margin-top: 8px;
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 155, 174, 0.3);
+  background: rgba(18, 26, 31, 0.9);
+  color: #dbe6ed;
+  padding: 8px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sidebar-button:hover {
+  background: rgba(24, 34, 40, 0.95);
+}
+
 .sidebar-meta {
   margin-top: 6px;
   font-size: 13px;
@@ -150,6 +166,14 @@
   font-size: 12px;
   pointer-events: none;
   box-shadow: 0 12px 30px rgba(4, 8, 10, 0.35);
+}
+
+.selection-rect {
+  position: absolute;
+  z-index: 3;
+  border: 1px dashed rgba(120, 196, 238, 0.9);
+  background: rgba(88, 160, 210, 0.18);
+  pointer-events: none;
 }
 
 @media (max-width: 900px) {

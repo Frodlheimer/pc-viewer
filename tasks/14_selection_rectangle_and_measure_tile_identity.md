@@ -1,11 +1,11 @@
-# Task 14 — Selection Rectangle + Measure (tile-aware identity)
-
-> **How to use:** Copy the entire block under **PROMPT** into Codex (VS Code).
-> Run in the `viewer/` project.
-
-## PROMPT
-
 Task 14: Implement Selection (rectangle) + Measure (2-point distance) using tile-aware identity (nodeId + indexWithinTile).
+
+IMPORTANT CONSTRAINTS (do not violate):
+- Do not change the dataset-load useEffect deps. It must remain [activeDatasetId, dispatch] only.
+- Do not set renderData to null except on dataset change.
+- Layer IDs must remain stable: `${activeDatasetId}:${keyFromTile(tile)}` only.
+- Use canonical keys everywhere: keyFromNodeId / keyFromTile.
+- Do not break OrbitController navigation. Selection/measure must NOT compete with orbit/zoom/pan.
 
 Goal:
 - Validate stable identity across streaming tiles.
@@ -14,34 +14,51 @@ Goal:
 Requirements:
 1) Store changes:
    - Extend store with:
-     - selection: { items: Array<{ nodeId: string, index: number, worldPos: [number,number,number] }> }
+     - selection: { items: Array<{ nodeId: string, index: number, worldPos: [number,number,number], tileKey?: string }> }
      - measurement: { a?: {...}, b?: {...}, distance?: number }
    - Add editMode handling: "select" and "measure".
+   - Keep selection identity based on (nodeId,index) where nodeId is stringified nodeId (or nodeKey).
 
-2) Rectangle selection UI:
-   - Implement a simple drag rectangle overlay (HTML div overlay is ok).
-   - On mouse down/up, compute rectangle in screen coords.
-   - Use deck.gl picking:
-     - pickObjects({x, y, width, height, layerIds}) on point layers
-   - Collect hits and deduplicate by (nodeId,index).
-   - Store worldPos from pick info (or reconstruct from tile + index).
+2) Input gating (avoid conflicts with OrbitController):
+   - Selection/measure actions only trigger when:
+     - editMode matches AND user holds a modifier key (use Shift for MVP).
+   - Without Shift, mouse drag/scroll should behave as normal camera navigation.
+   - This is mandatory for usability.
 
-3) Measure tool:
-   - Click first point sets A, second click sets B.
-   - Compute distance in world units (use world coords, not local tile coords unless you convert).
-   - Render a line using LineLayer between A and B.
-   - Display distance in Sidebar.
+3) Rectangle selection UI:
+   - Implement a simple drag rectangle overlay (HTML div overlay).
+   - Only start rectangle if editMode==="select" AND Shift is pressed on mousedown.
+   - On mouse up:
+     - compute rectangle bounds in screen coords.
+     - call deck.gl picking:
+       - deckRef.current.pickObjects({x, y, width, height, layerIds}) on point layers
+     - Collect hits, deduplicate by (nodeId,index).
+     - Store worldPos:
+       - Use info.coordinate if available, else reconstruct via tile + index (existing getWorldPosition).
+   - Add a "Clear selection" button in Sidebar (or reuse existing UI patterns).
 
-4) Stability:
-   - Must work while tiles stream in/out.
-   - No regressions to orbit/zoom/streaming.
+4) Measure tool:
+   - Only active when editMode==="measure" AND Shift is pressed during click.
+   - First Shift-click sets point A.
+   - Second Shift-click sets point B and computes distance:
+     - Euclidean distance in world coords.
+   - Render a line between A and B:
+     - Use a deck.gl LineLayer (or an existing layer factory if you have one).
+   - Display distance in Sidebar (meters or world units; label as "world units").
+
+5) Stability with streaming:
+   - Selection and measurement must remain valid even if tiles stream in/out:
+     - store worldPos (so UI doesn’t depend on tile staying loaded)
+     - keep identity (nodeId+index) for later delete/edit.
 
 Acceptance:
-- `npm run lint` passes
-- `npm run build` passes
-- `npm run dev` works
+- npm run lint passes
+- npm run build passes
+- npm run dev works
 - Box selection works across multiple tiles
 - Measure shows line and distance
+- Camera navigation still works normally when Shift is NOT held
+- No regressions to streaming/retained rendering (no blackouts)
 
 After:
 - List changed files and how to verify selection/measure.

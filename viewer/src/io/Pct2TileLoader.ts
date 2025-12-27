@@ -1,6 +1,9 @@
 import {
   AttributeTypeEnum,
   CodecEnum,
+  type Pct2AttributeDirectoryEntry,
+  type Pct2Directory,
+  type Pct2Header,
   type ParsedTile2,
   type TypedArray,
 } from "../types/Pct2";
@@ -45,23 +48,51 @@ const toNodeId = (value: bigint): bigint | number =>
   value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value;
 
 const decodePositions = (
-  buffer: ArrayBuffer,
-  byteOffset: number,
+  attribute: TypedArray,
   pointCount: number,
   scale: [number, number, number]
 ) => {
   const elementCount = pointCount * 3;
-  const intView = new Int32Array(buffer, byteOffset, elementCount);
+  if (attribute instanceof Float32Array) {
+    if (attribute.length < elementCount) {
+      throw new Error("PCT2 position attribute truncated.");
+    }
+    return attribute.slice(0, elementCount);
+  }
+
+  if (!(attribute instanceof Int32Array)) {
+    throw new Error("PCT2 position attribute must be int32x3.");
+  }
+
+  if (attribute.length < elementCount) {
+    throw new Error("PCT2 position attribute truncated.");
+  }
+
   const decoded = new Float32Array(elementCount);
   for (let i = 0; i < elementCount; i += 3) {
-    decoded[i] = intView[i] * scale[0];
-    decoded[i + 1] = intView[i + 1] * scale[1];
-    decoded[i + 2] = intView[i + 2] * scale[2];
+    decoded[i] = attribute[i] * scale[0];
+    decoded[i + 1] = attribute[i + 1] * scale[1];
+    decoded[i + 2] = attribute[i + 2] * scale[2];
   }
   return decoded;
 };
 
-export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
+type MandatoryDecodeOptions = {
+  positionName: string;
+  colorName?: string;
+  allowMissingColor?: boolean;
+};
+
+type MandatoryDecodeResult = {
+  positions: Float32Array;
+  colors?: Uint8Array;
+  positionName: string;
+  colorName?: string;
+};
+
+export const parsePct2HeaderAndDirectory = (
+  buffer: ArrayBuffer
+): { header: Pct2Header; directory: Pct2Directory } => {
   if (buffer.byteLength < FIXED_HEADER_BYTES) {
     throw new Error("PCT2 header truncated.");
   }
@@ -84,6 +115,7 @@ export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
 
   const nodeId = toNodeId(view.getBigUint64(8, true));
   const pointCount = view.getUint32(16, true);
+  const flags = view.getUint32(20, true);
   const origin = readVec3(view, 24);
   const scale = readVec3(view, 48);
   const attrCount = view.getUint16(72, true);
@@ -94,8 +126,21 @@ export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
   }
 
   const payloadStart = headerBytes;
+  const header: Pct2Header = {
+    magic,
+    version,
+    headerBytes,
+    nodeId,
+    pointCount,
+    flags,
+    origin,
+    scale,
+    attrCount,
+    payloadStart,
+  };
   let cursor = FIXED_HEADER_BYTES;
-  const attributes: Record<string, TypedArray> = {};
+  const attributes: Pct2AttributeDirectoryEntry[] = [];
+  const byName: Record<string, Pct2AttributeDirectoryEntry> = {};
 
   for (let index = 0; index < attrCount; index += 1) {
     if (cursor + 1 > headerBytes) {
@@ -117,13 +162,13 @@ export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
       throw new Error("PCT2 attribute entry truncated.");
     }
 
-    const type = view.getUint8(cursor);
+    const type = view.getUint8(cursor) as AttributeTypeEnum;
     cursor += 1;
     const components = view.getUint8(cursor);
     cursor += 1;
-    const codec = view.getUint8(cursor);
+    const codec = view.getUint8(cursor) as CodecEnum;
     cursor += 1;
-    const normalized = view.getUint8(cursor);
+    const normalized = view.getUint8(cursor) as 0 | 1;
     cursor += 1;
     const byteOffset = view.getUint32(cursor, true);
     cursor += 4;
@@ -169,41 +214,174 @@ export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
     if (byteLength < expectedByteLength) {
       throw new Error("PCT2 attribute payload truncated.");
     }
-
-    if (name === "position") {
-      if (type !== AttributeTypeEnum.Int32 || components !== 3) {
-        throw new Error("PCT2 position attribute must be int32x3.");
-      }
-      attributes[name] = decodePositions(
-        buffer,
-        payloadOffset,
-        pointCount,
-        scale
-      );
-      continue;
+    if (byName[name]) {
+      throw new Error(`PCT2 duplicate attribute name (${name}).`);
     }
 
-    const dataArray = new ArrayType(buffer, payloadOffset, elementCount);
-    attributes[name] = dataArray;
+    const entry: Pct2AttributeDirectoryEntry = {
+      name,
+      type,
+      components,
+      codec,
+      normalized,
+      byteOffset,
+      byteLength,
+      uncompressedByteLength,
+      payloadOffset,
+    };
+    attributes.push(entry);
+    byName[name] = entry;
   }
 
   return {
-    nodeId,
-    pointCount,
-    origin,
-    scale,
+    header,
+    directory: {
+      header,
+      attributes,
+      byName,
+    },
+  };
+};
+
+export const decodePct2Attributes = (
+  buffer: ArrayBuffer,
+  directory: Pct2Directory,
+  attrNames: string[]
+): Record<string, TypedArray> => {
+  const attributes: Record<string, TypedArray> = {};
+  const uniqueNames = Array.from(new Set(attrNames));
+  for (const name of uniqueNames) {
+    const entry = directory.byName[name];
+    if (!entry) {
+      throw new Error(`PCT2 attribute missing (${name}).`);
+    }
+    const ArrayType = TYPE_INFO[entry.type];
+    if (!ArrayType) {
+      throw new Error(`PCT2 unsupported attribute type ${entry.type}.`);
+    }
+    const elementCount = directory.header.pointCount * entry.components;
+    const expectedByteLength = elementCount * ArrayType.BYTES_PER_ELEMENT;
+    if (entry.byteLength < expectedByteLength) {
+      throw new Error("PCT2 attribute payload truncated.");
+    }
+    if (entry.payloadOffset + entry.byteLength > buffer.byteLength) {
+      throw new Error("PCT2 attribute block out of range.");
+    }
+    attributes[name] = new ArrayType(buffer, entry.payloadOffset, elementCount);
+  }
+  return attributes;
+};
+
+export const decodePct2Mandatory = (
+  buffer: ArrayBuffer,
+  directory: Pct2Directory,
+  options: MandatoryDecodeOptions
+): MandatoryDecodeResult => {
+  const positionName = options.positionName;
+  const colorName = options.colorName;
+  const allowMissingColor = options.allowMissingColor ?? false;
+  const attrNames = [positionName];
+  if (colorName && directory.byName[colorName]) {
+    attrNames.push(colorName);
+  } else if (colorName && !allowMissingColor) {
+    throw new Error(`PCT2 tile missing color attribute (${colorName}).`);
+  }
+  const attributes = decodePct2Attributes(buffer, directory, attrNames);
+  const rawPosition = attributes[positionName];
+  if (!rawPosition) {
+    throw new Error(`PCT2 tile missing position attribute (${positionName}).`);
+  }
+  const positions = decodePositions(
+    rawPosition,
+    directory.header.pointCount,
+    directory.header.scale
+  );
+
+  let colors: Uint8Array | undefined;
+  if (colorName) {
+    const rawColor = attributes[colorName];
+    if (rawColor instanceof Uint8Array) {
+      if (rawColor.length < directory.header.pointCount * 3) {
+        throw new Error("PCT2 rgb attribute truncated.");
+      }
+      colors = rawColor.slice();
+    }
+  }
+
+  return {
+    positions,
+    colors,
+    positionName,
+    colorName,
+  };
+};
+
+export const parsePct2TileEager = (buffer: ArrayBuffer): ParsedTile2 => {
+  const { header, directory } = parsePct2HeaderAndDirectory(buffer);
+  const attrNames = directory.attributes.map((entry) => entry.name);
+  const attributes = decodePct2Attributes(buffer, directory, attrNames);
+  const position = attributes.position;
+  if (position) {
+    attributes.position = decodePositions(
+      position,
+      header.pointCount,
+      header.scale
+    );
+  }
+  return {
+    nodeId: header.nodeId,
+    pointCount: header.pointCount,
+    origin: header.origin,
+    scale: header.scale,
     attributes,
   };
+};
+
+export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
+  const { header, directory } = parsePct2HeaderAndDirectory(buffer);
+  const mandatory = decodePct2Mandatory(buffer, directory, {
+    positionName: "position",
+    colorName: "rgb",
+    allowMissingColor: true,
+  });
+  const attributes: Record<string, TypedArray> = {
+    [mandatory.positionName]: mandatory.positions,
+  };
+  if (mandatory.colors && mandatory.colorName) {
+    attributes[mandatory.colorName] = mandatory.colors;
+  }
+  return {
+    nodeId: header.nodeId,
+    pointCount: header.pointCount,
+    origin: header.origin,
+    scale: header.scale,
+    attributes,
+  };
+};
+
+export const loadPct2TileBuffer = async (
+  url: string,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> => {
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    throw new Error(`PCT2 tile load failed (${response.status})`);
+  }
+  return response.arrayBuffer();
 };
 
 export const loadPct2Tile = async (
   url: string,
   signal?: AbortSignal
 ): Promise<ParsedTile2> => {
-  const response = await fetch(url, { signal });
-  if (!response.ok) {
-    throw new Error(`PCT2 tile load failed (${response.status})`);
-  }
-  const buffer = await response.arrayBuffer();
+  const buffer = await loadPct2TileBuffer(url, signal);
   return parsePct2Tile(buffer);
+};
+
+export const loadPct2TileEager = async (
+  url: string,
+  signal?: AbortSignal
+): Promise<ParsedTile2> => {
+  const buffer = await loadPct2TileBuffer(url, signal);
+  return parsePct2TileEager(buffer);
 };
