@@ -48,6 +48,15 @@ export type RuntimeStats = {
   inFlightRequests: number;
   queuedRequests: number;
   lastSelectionUpdateMs: number | null;
+  isInteracting: boolean;
+  targetVisiblePoints: number;
+  rangeCache: {
+    totalBytes: number;
+    totalWindows: number;
+    hits: number;
+    misses: number;
+    evictions: number;
+  };
 };
 
 export type AppSettings = {
@@ -131,6 +140,15 @@ const initialState: AppState = {
     inFlightRequests: 0,
     queuedRequests: 0,
     lastSelectionUpdateMs: null,
+    isInteracting: false,
+    targetVisiblePoints: 0,
+    rangeCache: {
+      totalBytes: 0,
+      totalWindows: 0,
+      hits: 0,
+      misses: 0,
+      evictions: 0,
+    },
   },
   hover: null,
   selection: null,

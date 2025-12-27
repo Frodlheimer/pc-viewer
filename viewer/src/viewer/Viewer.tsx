@@ -11,11 +11,14 @@ import { createPatchLayers } from "../layers/PatchLayersFactory";
 import { getRuntimeBudgets } from "../config/budgets";
 import { loadPage } from "../io/HierarchyPagingLoader";
 import { loadManifest } from "../io/ManifestLoader";
-import { selectNodes } from "../io/NodeSelector";
-import { TileService, isAbortError } from "../io/TileService";
+import { selectNodes, type SelectedNode } from "../io/NodeSelector";
+import { getRangeWindowStats } from "../io/RangeFetch";
+import { LoadScheduler } from "../io/LoadScheduler";
+import { TileService } from "../io/TileService";
 import { loadRenderData } from "../io/TileManager";
 import { useAppStore } from "../state/store";
-import type { DatasetManifest } from "../types/Dataset";
+import type { RuntimeStats } from "../state/store";
+import type { BoundsQuantization, DatasetManifest } from "../types/Dataset";
 import type { NodeRecord, Page } from "../types/Hierarchy";
 import { getDatasetById } from "../types/Dataset";
 import type { Vec3 } from "../types/Point";
@@ -63,6 +66,91 @@ const buildRenderData = (
   };
 };
 
+type HierarchyIndex = {
+  nodeById: Map<string, NodeRecord>;
+  childrenByParent: Map<string, NodeRecord[]>;
+};
+
+const buildHierarchyIndex = (nodes: NodeRecord[]): HierarchyIndex => {
+  const nodeById = new Map<string, NodeRecord>();
+  const childrenByParent = new Map<string, NodeRecord[]>();
+  nodes.forEach((node) => nodeById.set(nodeKey(node.nodeId), node));
+  nodes.forEach((node) => {
+    const parentKey = nodeKey(node.parentId);
+    if (nodeById.has(parentKey) && parentKey !== nodeKey(node.nodeId)) {
+      const list = childrenByParent.get(parentKey) ?? [];
+      list.push(node);
+      childrenByParent.set(parentKey, list);
+    }
+  });
+  return { nodeById, childrenByParent };
+};
+
+const decodeQuantizedBounds = (
+  bounds: NodeRecord["bounds"],
+  quantization: BoundsQuantization
+) => {
+  const [ox, oy, oz] = quantization.origin;
+  const [sx, sy, sz] = quantization.scale;
+  return {
+    min: [
+      ox + bounds.min[0] * sx,
+      oy + bounds.min[1] * sy,
+      oz + bounds.min[2] * sz,
+    ] as Vec3,
+    max: [
+      ox + bounds.max[0] * sx,
+      oy + bounds.max[1] * sy,
+      oz + bounds.max[2] * sz,
+    ] as Vec3,
+  };
+};
+
+const getBoundsRadius = (min: Vec3, max: Vec3) => {
+  const dx = max[0] - min[0];
+  const dy = max[1] - min[1];
+  const dz = max[2] - min[2];
+  const radius = 0.5 * Math.hypot(dx, dy, dz);
+  return Number.isFinite(radius) ? radius : 0;
+};
+
+const getFocalLengthPixels = (
+  projectionMatrix: number[] | undefined,
+  height: number
+) => {
+  const scale = projectionMatrix?.[5] ?? Number.NaN;
+  if (!Number.isFinite(scale)) {
+    return height / 2;
+  }
+  return Math.abs(scale) * (height / 2);
+};
+
+const getNodeMetrics = (
+  node: NodeRecord,
+  quantization: BoundsQuantization,
+  cameraPosition: Vec3,
+  projectionMatrix: number[] | undefined,
+  height: number
+) => {
+  const bounds = decodeQuantizedBounds(node.bounds, quantization);
+  const center: Vec3 = [
+    (bounds.min[0] + bounds.max[0]) / 2,
+    (bounds.min[1] + bounds.max[1]) / 2,
+    (bounds.min[2] + bounds.max[2]) / 2,
+  ];
+  const radius = getBoundsRadius(bounds.min, bounds.max);
+  const dx = center[0] - cameraPosition[0];
+  const dy = center[1] - cameraPosition[1];
+  const dz = center[2] - cameraPosition[2];
+  const distance = Math.max(1e-3, Math.hypot(dx, dy, dz));
+  const pixelRadius =
+    (radius / distance) * getFocalLengthPixels(projectionMatrix, height);
+  return {
+    pixelRadius: Number.isFinite(pixelRadius) ? pixelRadius : 0,
+    distance,
+  };
+};
+
 export const Viewer = () => {
   const { state, dispatch } = useAppStore();
   const {
@@ -85,15 +173,24 @@ export const Viewer = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const tileServiceRef = useRef<TileService>(new TileService());
+  const schedulerRef = useRef<LoadScheduler | null>(null);
+  const hierarchyIndexRef = useRef<HierarchyIndex | null>(null);
+  const manifestRef = useRef<DatasetManifest | null>(null);
+  const selectedEntriesRef = useRef<SelectedNode[]>([]);
+  const lastRenderKeyRef = useRef<string | null>(null);
   const selectedKeysRef = useRef<Set<string>>(new Set());
   const previousSelectionRef = useRef<Set<string>>(new Set());
   const selectionTimerRef = useRef<number | null>(null);
   const datasetLoadIdRef = useRef(0);
-  const selectionRunIdRef = useRef(0);
+  const idleTimerRef = useRef<number | null>(null);
+  const interactionIdleTimerRef = useRef<number | null>(null);
+  const isInteractingRef = useRef(false);
+  const [isInteracting, setIsInteracting] = useState(false);
   const budgets = useMemo(
     () => getRuntimeBudgets(settings.performanceProfile),
     [settings.performanceProfile]
   );
+  const budgetsRef = useRef(budgets);
   const manifest =
     manifestState?.datasetId === activeDatasetId
       ? manifestState.manifest
@@ -135,18 +232,217 @@ export const Viewer = () => {
     [viewportSize, viewState]
   );
 
+  const effectiveTargetVisiblePoints = isInteracting
+    ? budgets.targetVisiblePointsInteract
+    : budgets.targetVisiblePoints;
+
+  const selectionBudgets = useMemo(
+    () => ({ ...budgets, targetVisiblePoints: effectiveTargetVisiblePoints }),
+    [budgets, effectiveTargetVisiblePoints]
+  );
+
+  useEffect(() => {
+    budgetsRef.current = budgets;
+    schedulerRef.current?.setMaxConcurrentRequests(budgets.maxConcurrentRequests);
+  }, [budgets]);
+
+  useEffect(() => {
+    manifestRef.current = manifest;
+  }, [manifest]);
+
+  useEffect(() => {
+    hierarchyIndexRef.current = hierarchyPage
+      ? buildHierarchyIndex(hierarchyPage.records)
+      : null;
+  }, [hierarchyPage]);
+
+  const updateRenderDataFromCache = useCallback(() => {
+    const activeManifest = manifestRef.current;
+    if (!activeManifest) {
+      return;
+    }
+    const tiles: TileRenderData[] = [];
+    selectedEntriesRef.current.forEach((entry) => {
+      const tile = tileServiceRef.current.getCachedTile(
+        nodeKey(entry.node.nodeId)
+      );
+      if (tile) {
+        tiles.push(tile);
+      }
+    });
+    if (tiles.length === 0) {
+      if (lastRenderKeyRef.current !== null) {
+        lastRenderKeyRef.current = null;
+        dispatch({ type: "set-render-data", renderData: null });
+      }
+      return;
+    }
+    const tileIds = tiles.map((tile) => tile.id).sort();
+    const renderKey = `${activeManifest.id}:${tileIds.join("|")}`;
+    if (renderKey === lastRenderKeyRef.current) {
+      return;
+    }
+    lastRenderKeyRef.current = renderKey;
+    dispatch({
+      type: "set-render-data",
+      renderData: tiles.length > 0 ? buildRenderData(activeManifest, tiles) : null,
+    });
+  }, [dispatch]);
+
+  const updateRuntimeStats = useCallback(
+    (overrides: Partial<RuntimeStats> = {}) => {
+      const cacheStats = tileServiceRef.current.stats();
+      const schedulerStats = schedulerRef.current?.stats();
+      const rangeStats = getRangeWindowStats();
+      dispatch({
+        type: "set-runtime-stats",
+        stats: {
+          loadedTiles: cacheStats.items,
+          cpuCacheBytes: cacheStats.bytes,
+          inFlightRequests: schedulerStats?.inFlight ?? cacheStats.inFlight,
+          queuedRequests: schedulerStats?.queued ?? 0,
+          rangeCache: rangeStats,
+          isInteracting,
+          targetVisiblePoints: effectiveTargetVisiblePoints,
+          ...overrides,
+        },
+      });
+    },
+    [dispatch, isInteracting, effectiveTargetVisiblePoints]
+  );
+
+  const handleTileLoaded = useCallback(() => {
+    updateRenderDataFromCache();
+    updateRuntimeStats();
+  }, [updateRenderDataFromCache, updateRuntimeStats]);
+
+  const handleTileError = useCallback(
+    (error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : "Unknown loading error.";
+      dispatch({ type: "set-status", status: "error", error: message });
+    },
+    [dispatch]
+  );
+
+  useEffect(() => {
+    if (schedulerRef.current) {
+      return;
+    }
+    schedulerRef.current = new LoadScheduler({
+      tileService: tileServiceRef.current,
+      getManifest: () => manifestRef.current,
+      getBudgetBytes: () => budgetsRef.current.cpuCacheBudgetBytes,
+      maxConcurrentRequests: budgets.maxConcurrentRequests,
+      onTileLoaded: handleTileLoaded,
+      onError: handleTileError,
+    });
+  }, [handleTileLoaded, handleTileError, budgets.maxConcurrentRequests]);
+
+  useEffect(() => {
+    updateRuntimeStats({
+      isInteracting,
+      targetVisiblePoints: effectiveTargetVisiblePoints,
+    });
+  }, [isInteracting, effectiveTargetVisiblePoints, updateRuntimeStats]);
+
+  const requestPrefetch = useCallback(() => {
+    const manifestSnapshot = manifestRef.current;
+    const hierarchyIndex = hierarchyIndexRef.current;
+    const scheduler = schedulerRef.current;
+    if (!manifestSnapshot || !hierarchyIndex || !scheduler) {
+      return;
+    }
+    const stats = scheduler.stats();
+    if (stats.queued > 4 || stats.inFlight > 0) {
+      return;
+    }
+    const desiredEntries = selectedEntriesRef.current;
+    if (desiredEntries.length === 0) {
+      return;
+    }
+    const desiredKeys = selectedKeysRef.current;
+    const candidates = new Map<string, NodeRecord>();
+    for (const entry of desiredEntries) {
+      const parentKey = nodeKey(entry.node.parentId);
+      const siblings = hierarchyIndex.childrenByParent.get(parentKey) ?? [];
+      for (const sibling of siblings) {
+        const key = nodeKey(sibling.nodeId);
+        if (desiredKeys.has(key) || candidates.has(key)) {
+          continue;
+        }
+        if (tileServiceRef.current.has(key)) {
+          continue;
+        }
+        candidates.set(key, sibling);
+        if (candidates.size >= 20) {
+          break;
+        }
+      }
+      if (candidates.size >= 20) {
+        break;
+      }
+    }
+    if (candidates.size === 0) {
+      scheduler.setPrefetchNodes([]);
+      return;
+    }
+    const cameraPosition = orbitViewport.cameraPosition as Vec3;
+    const prefetchEntries = Array.from(candidates.values()).map((node) => {
+      const metrics = getNodeMetrics(
+        node,
+        manifestSnapshot.boundsQuantization,
+        cameraPosition,
+        orbitViewport.projectionMatrix,
+        viewportSize.height
+      );
+      return {
+        node,
+        pixelRadius: metrics.pixelRadius,
+        distance: metrics.distance,
+      };
+    });
+    scheduler.setPrefetchNodes(prefetchEntries);
+    scheduler.tick();
+    updateRuntimeStats({
+      queuedRequests: scheduler.stats().queued,
+      inFlightRequests: scheduler.stats().inFlight,
+    });
+  }, [orbitViewport, viewportSize.height, updateRuntimeStats]);
+
+  const setInteracting = useCallback((next: boolean) => {
+    if (isInteractingRef.current === next) {
+      return;
+    }
+    isInteractingRef.current = next;
+    setIsInteracting(next);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const dataset = getDatasetById(activeDatasetId);
     datasetLoadIdRef.current += 1;
     const loadId = datasetLoadIdRef.current;
     tileServiceRef.current.clear();
+    schedulerRef.current?.clear();
+    selectedEntriesRef.current = [];
+    lastRenderKeyRef.current = null;
     selectedKeysRef.current = new Set();
     previousSelectionRef.current = new Set();
     if (selectionTimerRef.current !== null) {
       window.clearTimeout(selectionTimerRef.current);
       selectionTimerRef.current = null;
     }
+    if (idleTimerRef.current !== null) {
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    if (interactionIdleTimerRef.current !== null) {
+      window.clearTimeout(interactionIdleTimerRef.current);
+      interactionIdleTimerRef.current = null;
+    }
+    isInteractingRef.current = false;
+    window.setTimeout(() => setIsInteracting(false), 0);
     dispatch({
       type: "set-runtime-stats",
       stats: {
@@ -157,6 +453,9 @@ export const Viewer = () => {
         inFlightRequests: 0,
         queuedRequests: 0,
         lastSelectionUpdateMs: null,
+        isInteracting: false,
+        targetVisiblePoints: effectiveTargetVisiblePoints,
+        rangeCache: getRangeWindowStats(),
       },
     });
 
@@ -211,6 +510,9 @@ export const Viewer = () => {
             inFlightRequests: 0,
             queuedRequests: 0,
             lastSelectionUpdateMs: 0,
+            isInteracting: isInteractingRef.current,
+            targetVisiblePoints: effectiveTargetVisiblePoints,
+            rangeCache: getRangeWindowStats(),
           },
         });
       })
@@ -224,7 +526,7 @@ export const Viewer = () => {
     return () => {
       cancelled = true;
     };
-  }, [activeDatasetId, dispatch]);
+  }, [activeDatasetId, dispatch, effectiveTargetVisiblePoints]);
 
   useEffect(() => {
     if (!manifest?.hierarchyUrl || !hierarchyPage) {
@@ -236,8 +538,6 @@ export const Viewer = () => {
     }
 
     selectionTimerRef.current = window.setTimeout(() => {
-      selectionRunIdRef.current += 1;
-      const selectionRunId = selectionRunIdRef.current;
       const selectionStart = performance.now();
       const selectionResult = selectNodes({
         viewport: orbitViewport,
@@ -245,12 +545,13 @@ export const Viewer = () => {
         height: viewportSize.height,
         nodes: hierarchyPage.records,
         boundsQuantization: manifest.boundsQuantization,
-        runtimeBudgets: budgets,
+        runtimeBudgets: selectionBudgets,
         previousSelection: previousSelectionRef.current,
       });
-      const selectedNodes = selectionResult.selected;
+      const selectedEntries = selectionResult.selected;
+      selectedEntriesRef.current = selectedEntries;
       const nextSelectedKeys = new Set(
-        selectedNodes.map((node) => nodeKey(node.nodeId))
+        selectedEntries.map((entry) => nodeKey(entry.node.nodeId))
       );
       const previousKeys = selectedKeysRef.current;
       selectedKeysRef.current = nextSelectedKeys;
@@ -264,159 +565,40 @@ export const Viewer = () => {
       });
       nextSelectedKeys.forEach((key) => tileServiceRef.current.pin(key));
 
-      const selectedPoints = selectionResult.diagnostics.visiblePoints;
-      const cacheStats = tileServiceRef.current.stats();
-      const cachedTiles: TileRenderData[] = [];
-      selectedNodes.forEach((node) => {
-        const tile = tileServiceRef.current.getCachedTile(nodeKey(node.nodeId));
-        if (tile) {
-          cachedTiles.push(tile);
-        }
-      });
-      dispatch({
-        type: "set-render-data",
-        renderData:
-          cachedTiles.length > 0 ? buildRenderData(manifest, cachedTiles) : null,
-      });
+      updateRenderDataFromCache();
 
       if (import.meta.env.DEV) {
         console.info("[hierarchy] node selection", {
           zoom: viewState.zoom,
-          selected: selectedNodes.length,
+          selected: selectedEntries.length,
           levels: selectionResult.diagnostics.selectedLevels,
           reasons: selectionResult.diagnostics.reasonCounts,
         });
       }
 
-      dispatch({
-        type: "set-runtime-stats",
-        stats: {
-          selectedNodes: selectionResult.diagnostics.selectedCount,
-          visiblePoints: selectedPoints,
-          loadedTiles: cacheStats.items,
-          cpuCacheBytes: cacheStats.bytes,
-          inFlightRequests: cacheStats.inFlight,
-          queuedRequests: 0,
-        },
+      const scheduler = schedulerRef.current;
+      scheduler?.setDesiredNodes(selectedEntries);
+      scheduler?.tick();
+
+      const schedulerStats = scheduler?.stats();
+      updateRuntimeStats({
+        selectedNodes: selectionResult.diagnostics.selectedCount,
+        visiblePoints: selectionResult.diagnostics.visiblePoints,
+        lastSelectionUpdateMs: Math.round(performance.now() - selectionStart),
+        queuedRequests: schedulerStats?.queued ?? 0,
+        inFlightRequests: schedulerStats?.inFlight ?? 0,
+        isInteracting,
+        targetVisiblePoints: effectiveTargetVisiblePoints,
       });
 
-      if (selectedNodes.length === 0) {
+      if (!schedulerStats || selectedEntries.length === 0) {
         dispatch({ type: "set-status", status: "ready", error: null });
-        dispatch({
-          type: "set-runtime-stats",
-          stats: {
-            lastSelectionUpdateMs: Math.round(
-              performance.now() - selectionStart
-            ),
-          },
-        });
-        return;
-      }
-
-      const hasMissing = selectedNodes.some(
-        (node) => !tileServiceRef.current.has(nodeKey(node.nodeId))
-      );
-      if (!hasMissing) {
-        dispatch({
-          type: "set-runtime-stats",
-          stats: {
-            lastSelectionUpdateMs: Math.round(
-              performance.now() - selectionStart
-            ),
-          },
-        });
+      } else if (schedulerStats.queued > 0 || schedulerStats.inFlight > 0) {
+        dispatch({ type: "set-status", status: "loading", error: null });
+      } else {
         dispatch({ type: "set-status", status: "ready", error: null });
-        return;
       }
-
-      dispatch({ type: "set-status", status: "loading", error: null });
-
-      const loadId = datasetLoadIdRef.current;
-      const tilePromises = selectedNodes.map((node) =>
-        tileServiceRef.current.getTile(
-          manifest,
-          node,
-          budgets.cpuCacheBudgetBytes
-        )
-      );
-      const inFlightStats = tileServiceRef.current.stats();
-      dispatch({
-        type: "set-runtime-stats",
-        stats: { inFlightRequests: inFlightStats.inFlight },
-      });
-
-      Promise.allSettled(tilePromises)
-        .then((results) => {
-          if (datasetLoadIdRef.current !== loadId) return;
-          if (selectionRunIdRef.current !== selectionRunId) return;
-
-          const failures = results.filter(
-            (result) => result.status === "rejected"
-          );
-          const hardFailures = failures.filter(
-            (result) =>
-              result.status === "rejected" &&
-              !isAbortError(result.reason)
-          );
-
-          if (hardFailures.length > 0) {
-            const message =
-              hardFailures[0].status === "rejected" &&
-              hardFailures[0].reason instanceof Error
-                ? hardFailures[0].reason.message
-                : "Unknown loading error.";
-            dispatch({ type: "set-status", status: "error", error: message });
-          } else {
-            dispatch({ type: "set-status", status: "ready", error: null });
-          }
-
-          const tiles: TileRenderData[] = [];
-          selectedNodes.forEach((node) => {
-            const tile = tileServiceRef.current.getCachedTile(
-              nodeKey(node.nodeId)
-            );
-            if (tile) {
-              tiles.push(tile);
-            }
-          });
-          dispatch({
-            type: "set-render-data",
-            renderData: tiles.length > 0 ? buildRenderData(manifest, tiles) : null,
-          });
-
-          const stats = tileServiceRef.current.stats();
-          dispatch({
-            type: "set-runtime-stats",
-            stats: {
-              loadedTiles: stats.items,
-              cpuCacheBytes: stats.bytes,
-              inFlightRequests: stats.inFlight,
-              lastSelectionUpdateMs: Math.round(
-                performance.now() - selectionStart
-              ),
-            },
-          });
-        })
-        .catch(() => {
-          if (datasetLoadIdRef.current !== loadId) return;
-          if (selectionRunIdRef.current !== selectionRunId) return;
-          dispatch({
-            type: "set-status",
-            status: "error",
-            error: "Unknown loading error.",
-          });
-          const stats = tileServiceRef.current.stats();
-          dispatch({
-            type: "set-runtime-stats",
-            stats: {
-              inFlightRequests: stats.inFlight,
-              lastSelectionUpdateMs: Math.round(
-                performance.now() - selectionStart
-              ),
-            },
-          });
-        });
-    }, budgets.viewDebounceMs);
+    }, selectionBudgets.viewDebounceMs);
 
     return () => {
       if (selectionTimerRef.current !== null) {
@@ -430,7 +612,11 @@ export const Viewer = () => {
     viewportSize,
     orbitViewport,
     dispatch,
-    budgets,
+    selectionBudgets,
+    isInteracting,
+    effectiveTargetVisiblePoints,
+    updateRenderDataFromCache,
+    updateRuntimeStats,
   ]);
 
   const handleHover = useCallback(
@@ -489,16 +675,38 @@ export const Viewer = () => {
   const layers = useMemo(() => {
     const baseLayers =
       renderData && showPointCloud
-        ? renderData.tiles.map((tile) =>
-            createPointCloudLayer(tile, {
-              onHover: (info) => handleHover(tile, info),
-              onClick: (info) => handleClick(tile, info),
-            })
-          )
+        ? renderData.tiles.map((tile) => {
+            const layerKey = tile.nodeId
+              ? nodeKey(tile.nodeId)
+              : tile.id;
+            const layerId = `pointcloud-${activeDatasetId}-${layerKey}`;
+            return createPointCloudLayer(
+              tile,
+              {
+                onHover: (info) => handleHover(tile, info),
+                onClick: (info) => handleClick(tile, info),
+              },
+              {
+                id: layerId,
+                pickable: !isInteracting,
+                autoHighlight: !isInteracting,
+                pointSize: isInteracting ? 1 : 2,
+              }
+            );
+          })
         : [];
     const patchLayers = createPatchLayers(patches, editMode);
     return [...baseLayers, ...patchLayers];
-  }, [renderData, showPointCloud, handleHover, handleClick, patches, editMode]);
+  }, [
+    renderData,
+    showPointCloud,
+    handleHover,
+    handleClick,
+    patches,
+    editMode,
+    activeDatasetId,
+    isInteracting,
+  ]);
 
   return (
     <div className="viewer-root" ref={containerRef}>
@@ -507,7 +715,35 @@ export const Viewer = () => {
         controller={{ type: OrbitController }}
         viewState={viewState}
         layers={layers}
+        onInteractionStateChange={(interactionState) => {
+          const active =
+            interactionState.isDragging ||
+            interactionState.isZooming ||
+            interactionState.isPanning ||
+            interactionState.isRotating;
+          if (active) {
+            setInteracting(true);
+            if (interactionIdleTimerRef.current !== null) {
+              window.clearTimeout(interactionIdleTimerRef.current);
+              interactionIdleTimerRef.current = null;
+            }
+          } else {
+            if (interactionIdleTimerRef.current !== null) {
+              window.clearTimeout(interactionIdleTimerRef.current);
+            }
+            interactionIdleTimerRef.current = window.setTimeout(() => {
+              setInteracting(false);
+              interactionIdleTimerRef.current = null;
+            }, budgetsRef.current.interactionIdleMs);
+          }
+        }}
         onViewStateChange={({ viewState: nextViewState }) => {
+          if (idleTimerRef.current !== null) {
+            window.clearTimeout(idleTimerRef.current);
+          }
+          idleTimerRef.current = window.setTimeout(() => {
+            requestPrefetch();
+          }, 300);
           dispatch({
             type: "set-view-state",
             viewState: {

@@ -131,6 +131,12 @@ export const Sidebar = () => {
         {settings.debugEnabled && (
           <>
             <div className="sidebar-meta">
+              Interacting: {runtimeStats.isInteracting ? "yes" : "no"}
+            </div>
+            <div className="sidebar-meta">
+              Target Points: {runtimeStats.targetVisiblePoints.toLocaleString()}
+            </div>
+            <div className="sidebar-meta">
               Selected Nodes: {runtimeStats.selectedNodes}
             </div>
             <div className="sidebar-meta">
@@ -141,6 +147,19 @@ export const Sidebar = () => {
             </div>
             <div className="sidebar-meta">
               CPU Cache: {runtimeStats.cpuCacheBytes.toLocaleString()} bytes
+            </div>
+            <div className="sidebar-meta">
+              Range Windows: {runtimeStats.rangeCache.totalWindows}
+            </div>
+            <div className="sidebar-meta">
+              Range Bytes: {runtimeStats.rangeCache.totalBytes.toLocaleString()} bytes
+            </div>
+            <div className="sidebar-meta">
+              Range Hits/Misses: {runtimeStats.rangeCache.hits}/
+              {runtimeStats.rangeCache.misses}
+            </div>
+            <div className="sidebar-meta">
+              Range Evictions: {runtimeStats.rangeCache.evictions}
             </div>
             <div className="sidebar-meta">
               In-Flight: {runtimeStats.inFlightRequests}

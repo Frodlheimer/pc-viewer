@@ -37,8 +37,14 @@ export type NodeSelectionDiagnostics = {
 };
 
 export type NodeSelectionResult = {
-  selected: NodeRecord[];
+  selected: SelectedNode[];
   diagnostics: NodeSelectionDiagnostics;
+};
+
+export type SelectedNode = {
+  node: NodeRecord;
+  pixelRadius: number;
+  distance: number;
 };
 
 type DecodedBounds = {
@@ -51,6 +57,7 @@ type NodeInfo = {
   center: Vec3;
   radius: number;
   pixelRadius: number;
+  distance: number;
   visible: boolean;
   children: NodeRecord[];
 };
@@ -341,6 +348,7 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
       center,
       radius,
       pixelRadius: Number.isFinite(pixelRadius) ? pixelRadius : 0,
+      distance,
       visible,
       children,
     };
@@ -354,7 +362,7 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
     queue.push({ node, priority: info.pixelRadius });
   });
 
-  const selected: NodeRecord[] = [];
+  const selected: SelectedNode[] = [];
   const selectedKeys = new Set<string>();
   const selectedLevels: Record<number, number> = {};
   const reasonCounts = {
@@ -416,7 +424,11 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
         input.previousSelection?.has(key) &&
         !selectedKeys.has(key)
       ) {
-        selected.push(node);
+        selected.push({
+          node,
+          pixelRadius: info.pixelRadius,
+          distance: info.distance,
+        });
         selectedKeys.add(key);
         visiblePoints += node.pointCount;
         selectedLevels[node.level] = (selectedLevels[node.level] ?? 0) + 1;
@@ -432,7 +444,11 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
     }
 
     if (!selectedKeys.has(key)) {
-      selected.push(node);
+      selected.push({
+        node,
+        pixelRadius: info.pixelRadius,
+        distance: info.distance,
+      });
       selectedKeys.add(key);
       visiblePoints += node.pointCount;
       selectedLevels[node.level] = (selectedLevels[node.level] ?? 0) + 1;

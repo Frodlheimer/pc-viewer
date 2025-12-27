@@ -15,9 +15,17 @@ export type PointCloudCallbacks = {
   onClick: (info: PickingInfo) => void;
 };
 
+export type PointCloudLayerOptions = {
+  id: string;
+  pickable?: boolean;
+  autoHighlight?: boolean;
+  pointSize?: number;
+};
+
 export const createPointCloudLayer = (
   tile: TileRenderData,
-  callbacks: PointCloudCallbacks
+  callbacks: PointCloudCallbacks,
+  options: PointCloudLayerOptions
 ) => {
   const attributes: BinaryAttributes["attributes"] = {
     getPosition: { value: tile.positions, size: 3 },
@@ -36,12 +44,13 @@ export const createPointCloudLayer = (
     attributes,
   };
 
+  const pickable = options.pickable ?? true;
   return new PointCloudLayer<BinaryAttributes>({
-    id: `pointcloud-${tile.id}`,
+    id: options.id,
     data,
-    pickable: true,
-    autoHighlight: true,
-    pointSize: 2,
+    pickable,
+    autoHighlight: options.autoHighlight ?? pickable,
+    pointSize: options.pointSize ?? 2,
     onHover: callbacks.onHover,
     onClick: callbacks.onClick,
   });

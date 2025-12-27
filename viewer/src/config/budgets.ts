@@ -7,6 +7,9 @@ export const MAX_VISIBLE_POINTS_DEFAULT = 10_000_000;
 export const TARGET_VISIBLE_POINTS_DEFAULT = 6_000_000;
 // Soft target for node selection (aim below the max for stability).
 
+export const TARGET_VISIBLE_POINTS_INTERACT_DEFAULT = 2_000_000;
+// Lower selection target while interacting to keep FPS responsive.
+
 export const CPU_TILE_CACHE_BUDGET_BYTES_DEFAULT = 2.5 * 1024 ** 3;
 // Budget for decoded tile data kept in CPU memory.
 
@@ -19,6 +22,9 @@ export const MAX_CONCURRENT_TILE_REQUESTS = 6;
 export const VIEWSTATE_DEBOUNCE_MS = 150;
 // Debounce window for view-driven selection updates.
 
+export const INTERACTION_IDLE_MS = 350;
+// Time to wait after interaction before returning to full quality.
+
 export const LOD_HYSTERESIS_FACTOR = 1.25;
 // Hysteresis factor to avoid LOD thrashing when zooming.
 
@@ -28,10 +34,12 @@ export type RuntimeBudgets = {
   tilePointCap: number;
   maxVisiblePoints: number;
   targetVisiblePoints: number;
+  targetVisiblePointsInteract: number;
   cpuCacheBudgetBytes: number;
   gpuCacheBudgetBytes: number;
   maxConcurrentRequests: number;
   viewDebounceMs: number;
+  interactionIdleMs: number;
   lodHysteresisFactor: number;
   profile: Exclude<PerformanceProfile, "auto">;
 };
@@ -89,12 +97,22 @@ export const getRuntimeBudgets = (
       TARGET_VISIBLE_POINTS_DEFAULT
     )
   );
+  const targetVisiblePointsInteract = Math.round(
+    clampToDefault(
+      TARGET_VISIBLE_POINTS_INTERACT_DEFAULT * scale,
+      TARGET_VISIBLE_POINTS_INTERACT_DEFAULT
+    )
+  );
 
   return {
     profile: resolvedProfile,
     tilePointCap: TILE_POINT_CAP,
     maxVisiblePoints,
     targetVisiblePoints: Math.min(targetVisiblePoints, maxVisiblePoints),
+    targetVisiblePointsInteract: Math.min(
+      targetVisiblePointsInteract,
+      maxVisiblePoints
+    ),
     cpuCacheBudgetBytes: clampToDefault(
       CPU_TILE_CACHE_BUDGET_BYTES_DEFAULT * scale,
       CPU_TILE_CACHE_BUDGET_BYTES_DEFAULT
@@ -115,6 +133,7 @@ export const getRuntimeBudgets = (
     viewDebounceMs: Math.round(
       clampToDefault(viewDebounceMs, VIEWSTATE_DEBOUNCE_MS)
     ),
+    interactionIdleMs: INTERACTION_IDLE_MS,
     lodHysteresisFactor: LOD_HYSTERESIS_FACTOR,
   };
 };
