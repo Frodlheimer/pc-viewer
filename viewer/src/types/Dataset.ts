@@ -94,6 +94,11 @@ export const DATASETS: DatasetOption[] = [
     name: "Demo Dataset",
     manifestUrl: "/datasets/demo/manifest.json",
   },
+  {
+    id: "test5m",
+    name: "Test 5M Dataset",
+    manifestUrl: "/datasets/test5m/manifest.json",
+  },
 ];
 
 export const getDatasetById = (id: string) =>

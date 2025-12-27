@@ -4,17 +4,54 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
-const datasetDir = path.join(rootDir, "public", "datasets", "demo");
+
+const parseArgs = () => {
+  const args = new Map();
+  for (let i = 2; i < process.argv.length; i += 1) {
+    const raw = process.argv[i];
+    if (!raw.startsWith("--")) {
+      continue;
+    }
+    const key = raw.slice(2);
+    const next = process.argv[i + 1];
+    if (next && !next.startsWith("--")) {
+      args.set(key, next);
+      i += 1;
+    } else {
+      args.set(key, "true");
+    }
+  }
+  return args;
+};
+
+const toDefaultName = (id) => {
+  if (id === "demo") return "Demo Dataset";
+  if (id === "test5m") return "Test 5M Dataset";
+  return `Dataset ${id}`;
+};
+
+const args = parseArgs();
+const datasetId = args.get("id") ?? "demo";
+const datasetName = args.get("name") ?? toDefaultName(datasetId);
+const pointCount = Number(args.get("points") ?? (datasetId === "demo" ? 50_000 : 5_000_000));
+const includePct1 = !args.has("no-pct1");
+
+if (!Number.isFinite(pointCount) || pointCount <= 0) {
+  throw new Error("Point count must be a positive number.");
+}
+
+const datasetDir = path.join(rootDir, "public", "datasets", datasetId);
 const tilesDir = path.join(datasetDir, "tiles");
 
 const tileId = "0_0_0";
-const pointCount = 50_000;
 const quantizationOrigin = [0, 0, 0];
 const quantizationScale = [0.001, 0.001, 0.001];
 
 const positions = new Float32Array(pointCount * 3);
 const colors = new Uint8Array(pointCount * 3);
 const positionsInt32 = new Int32Array(pointCount * 3);
+
+await mkdir(datasetDir, { recursive: true });
 
 let minX = Infinity;
 let minY = Infinity;
@@ -23,15 +60,21 @@ let maxX = -Infinity;
 let maxY = -Infinity;
 let maxZ = -Infinity;
 
+let seed = 1337;
+const rand = () => {
+  seed = (seed * 1664525 + 1013904223) % 0xffffffff;
+  return seed / 0xffffffff;
+};
+
 for (let i = 0; i < pointCount; i += 1) {
   const t = i / pointCount;
-  const angle = t * Math.PI * 28;
-  const radius = 55 + Math.sin(t * 10) * 8;
-  const jitter = (Math.random() - 0.5) * 2.2;
+  const angle = t * Math.PI * 36;
+  const radius = 80 + Math.sin(t * 12) * 12;
+  const jitter = (rand() - 0.5) * 3.5;
 
   const x = Math.cos(angle) * radius + jitter;
   const y = Math.sin(angle) * radius + jitter;
-  const z = (t - 0.5) * 90 + (Math.random() - 0.5) * 2;
+  const z = (t - 0.5) * 160 + (rand() - 0.5) * 3;
 
   const offset = i * 3;
   positions[offset] = x;
@@ -54,9 +97,9 @@ for (let i = 0; i < pointCount; i += 1) {
   maxY = Math.max(maxY, y);
   maxZ = Math.max(maxZ, z);
 
-  const r = Math.round(140 + 90 * Math.sin(t * Math.PI));
-  const g = Math.round(80 + 170 * t);
-  const b = Math.round(220 - 140 * t);
+  const r = Math.round(80 + 140 * Math.sin(t * Math.PI));
+  const g = Math.round(70 + 160 * (1 - t));
+  const b = Math.round(200 - 120 * Math.cos(t * Math.PI));
 
   colors[offset] = Math.max(0, Math.min(255, r));
   colors[offset + 1] = Math.max(0, Math.min(255, g));
@@ -77,26 +120,28 @@ const quantizedBounds = {
   ],
 };
 
-const headerSize = 16;
-const buffer = new ArrayBuffer(
-  headerSize + positions.byteLength + colors.byteLength
-);
-const view = new DataView(buffer);
-view.setUint8(0, "P".charCodeAt(0));
-view.setUint8(1, "C".charCodeAt(0));
-view.setUint8(2, "T".charCodeAt(0));
-view.setUint8(3, "1".charCodeAt(0));
-view.setUint32(4, 1, true);
-view.setUint32(8, pointCount, true);
-view.setUint32(12, 1, true);
+if (includePct1) {
+  const headerSize = 16;
+  const buffer = new ArrayBuffer(
+    headerSize + positions.byteLength + colors.byteLength
+  );
+  const view = new DataView(buffer);
+  view.setUint8(0, "P".charCodeAt(0));
+  view.setUint8(1, "C".charCodeAt(0));
+  view.setUint8(2, "T".charCodeAt(0));
+  view.setUint8(3, "1".charCodeAt(0));
+  view.setUint32(4, 1, true);
+  view.setUint32(8, pointCount, true);
+  view.setUint32(12, 1, true);
 
-new Float32Array(buffer, headerSize, positions.length).set(positions);
-new Uint8Array(buffer, headerSize + positions.byteLength, colors.length).set(
-  colors
-);
+  new Float32Array(buffer, headerSize, positions.length).set(positions);
+  new Uint8Array(buffer, headerSize + positions.byteLength, colors.length).set(
+    colors
+  );
 
-await mkdir(tilesDir, { recursive: true });
-await writeFile(path.join(tilesDir, `${tileId}.pct`), Buffer.from(buffer));
+  await mkdir(tilesDir, { recursive: true });
+  await writeFile(path.join(tilesDir, `${tileId}.pct`), Buffer.from(buffer));
+}
 
 const align = (value, alignment) =>
   Math.ceil(value / alignment) * alignment;
@@ -192,7 +237,8 @@ const createPct2Buffer = () => {
 };
 
 const pct2Buffer = createPct2Buffer();
-const containerPath = path.join(datasetDir, "demo_tiles.pctc");
+const containerName = `${datasetId}_tiles.pctc`;
+const containerPath = path.join(datasetDir, containerName);
 await writeFile(containerPath, Buffer.from(pct2Buffer));
 
 const createHierarchyPage = () => {
@@ -237,10 +283,28 @@ const createHierarchyPage = () => {
 const hierarchyPath = path.join(datasetDir, "hierarchy.pch");
 await writeFile(hierarchyPath, Buffer.from(createHierarchyPage()));
 
+const levelTile = includePct1
+  ? {
+      id: tileId,
+      url: `/datasets/${datasetId}/tiles/${tileId}.pct`,
+      bounds,
+      pointCount,
+    }
+  : {
+      id: tileId,
+      nodeId: 1,
+      bounds,
+      pointCount,
+      format: "pct2",
+      containerUrl: `/datasets/${datasetId}/${containerName}`,
+      byteOffset: 0,
+      byteLength: pct2Buffer.byteLength,
+    };
+
 const manifest = {
   schemaVersion: 0.2,
-  id: "demo",
-  name: "Demo Dataset",
+  id: datasetId,
+  name: datasetName,
   crs: {},
   units: "meters",
   attributes: [
@@ -252,20 +316,13 @@ const manifest = {
     origin: quantizationOrigin,
     scale: quantizationScale,
   },
-  hierarchyUrl: "/datasets/demo/hierarchy.pch",
+  hierarchyUrl: `/datasets/${datasetId}/hierarchy.pch`,
   hierarchyPageBytes: 65536,
-  containers: [{ url: "/datasets/demo/demo_tiles.pctc" }],
+  containers: [{ url: `/datasets/${datasetId}/${containerName}` }],
   levels: [
     {
       id: "L0",
-      tiles: [
-        {
-          id: tileId,
-          url: `/datasets/demo/tiles/${tileId}.pct`,
-          bounds,
-          pointCount,
-        },
-      ],
+      tiles: [levelTile],
     },
   ],
   bounds,
@@ -277,5 +334,5 @@ await writeFile(
 );
 
 console.log(
-  `Generated demo tile ${tileId} with ${pointCount.toLocaleString()} points.`
+  `Generated dataset ${datasetId} (${tileId}) with ${pointCount.toLocaleString()} points.`
 );

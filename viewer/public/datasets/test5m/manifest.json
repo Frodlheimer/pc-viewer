@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 0.2,
+  "id": "test5m",
+  "name": "Test 5M Dataset",
+  "crs": {},
+  "units": "meters",
+  "attributes": [
+    {
+      "name": "position",
+      "type": "float32",
+      "components": 3,
+      "role": "position"
+    },
+    {
+      "name": "rgb",
+      "type": "uint8",
+      "components": 3,
+      "role": "color"
+    }
+  ],
+  "roles": {
+    "position": "position",
+    "color": "rgb"
+  },
+  "boundsQuantization": {
+    "origin": [
+      0,
+      0,
+      0
+    ],
+    "scale": [
+      0.001,
+      0.001,
+      0.001
+    ]
+  },
+  "hierarchyUrl": "/datasets/test5m/hierarchy.pch",
+  "hierarchyPageBytes": 65536,
+  "containers": [
+    {
+      "url": "/datasets/test5m/test5m_tiles.pctc"
+    }
+  ],
+  "levels": [
+    {
+      "id": "L0",
+      "tiles": [
+        {
+          "id": "0_0_0",
+          "nodeId": 1,
+          "bounds": [
+            -93.68895417357815,
+            -93.74514904752674,
+            -81.48557206325799,
+            93.61979963936965,
+            93.71614909372873,
+            81.48551514263306
+          ],
+          "pointCount": 5000000,
+          "format": "pct2",
+          "containerUrl": "/datasets/test5m/test5m_tiles.pctc",
+          "byteOffset": 0,
+          "byteLength": 75000124
+        }
+      ]
+    }
+  ],
+  "bounds": [
+    -93.68895417357815,
+    -93.74514904752674,
+    -81.48557206325799,
+    93.61979963936965,
+    93.71614909372873,
+    81.48551514263306
+  ]
+}

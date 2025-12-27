@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "generate:demo-tiles": "node scripts/generate-demo-tiles.mjs",
+    "generate:test5m": "node scripts/generate-demo-tiles.mjs --id test5m --points 5000000 --no-pct1",
     "preview": "vite preview"
   },
   "dependencies": {
