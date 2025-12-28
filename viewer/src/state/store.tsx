@@ -36,7 +36,8 @@ export type AddedPointsPatch = {
 
 export type PatchState = {
   addedPoints: AddedPointsPatch;
-  deleted: Map<string, Uint8Array>;
+  deleted: Map<string, Float32Array>;
+  deletedVersions: Map<string, number>;
   updatedAttributes: Map<string, Map<number, Record<string, number>>>;
 };
 
@@ -127,7 +128,11 @@ type AppAction =
   | { type: "set-view-state"; viewState: ViewState }
   | { type: "initialize-view-state"; datasetId: string; bounds: Bounds }
   | { type: "set-edit-mode"; mode: EditMode }
-  | { type: "set-deleted-masks"; deleted: Map<string, Uint8Array> }
+  | {
+      type: "set-deleted-masks";
+      deleted: Map<string, Float32Array>;
+      deletedVersions: Map<string, number>;
+    }
   | { type: "request-delete-selection" }
   | { type: "set-settings"; settings: Partial<AppSettings> }
   | { type: "set-runtime-stats"; stats: Partial<RuntimeStats> }
@@ -153,6 +158,7 @@ const initialState: AppState = {
       positions: new Float32Array(0),
     },
     deleted: new Map(),
+    deletedVersions: new Map(),
     updatedAttributes: new Map(),
   },
   deleteSelectionRequestId: 0,
@@ -226,7 +232,11 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
     case "set-deleted-masks":
       return {
         ...state,
-        patches: { ...state.patches, deleted: action.deleted },
+        patches: {
+          ...state.patches,
+          deleted: action.deleted,
+          deletedVersions: action.deletedVersions,
+        },
       };
     case "request-delete-selection":
       return {

@@ -12,7 +12,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { createPointCloudLayer } from "../layers/PointCloudLayerFactory";
 import { createPatchLayers } from "../layers/PatchLayersFactory";
@@ -33,6 +32,8 @@ import type { Vec3 } from "../types/Point";
 import type { RenderData, TileRenderData } from "../types/Tile";
 import { getBoundsCenter } from "../utils/bounds";
 import { keyFromNodeId, keyFromTile } from "../utils/nodeKey";
+import { applyDeletesToVisibilityMask } from "../utils/visibilityMask";
+import { useRectangleSelection } from "./hooks/useRectangleSelection";
 
 const getVec3 = (buffer: Float32Array, index: number): Vec3 => {
   const offset = index * 3;
@@ -194,7 +195,6 @@ export const Viewer = () => {
   const lastRenderKeyRef = useRef<string | null>(null);
   const previousSelectionRef = useRef<Set<string>>(new Set());
   const selectionTimerRef = useRef<number | null>(null);
-  const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
   const datasetLoadIdRef = useRef(0);
   const idleTimerRef = useRef<number | null>(null);
   const interactionIdleTimerRef = useRef<number | null>(null);
@@ -202,12 +202,6 @@ export const Viewer = () => {
   const lastInteractionStatsAtRef = useRef(0);
   const isInteractingRef = useRef(false);
   const [isInteracting, setIsInteracting] = useState(false);
-  const [selectionRect, setSelectionRect] = useState<{
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } | null>(null);
   const budgets = useMemo(
     () => getRuntimeBudgets(settings.performanceProfile),
     [settings.performanceProfile]
@@ -317,31 +311,27 @@ export const Viewer = () => {
     return map;
   }, [renderData]);
 
-  const filterValuesByTileKey = useMemo(() => {
-    const map = new Map<string, Uint8Array>();
-    if (!renderData || patches.deleted.size === 0) {
+  const modelMatrixByKey = useMemo(() => {
+    const map = new Map<string, Float64Array>();
+    if (!renderData) {
       return map;
     }
     renderData.tiles.forEach((tile) => {
-      const tileKey = keyFromTile(tile);
-      const nodeKey =
-        tile.nodeId !== undefined ? keyFromNodeId(tile.nodeId) : tileKey;
-      const mask = patches.deleted.get(nodeKey);
-      if (!mask) {
+      if (!tile.origin) {
         return;
       }
-      const filterValues = new Uint8Array(tile.pointCount);
-      filterValues.fill(1);
-      const len = Math.min(mask.length, filterValues.length);
-      for (let i = 0; i < len; i += 1) {
-        if (mask[i] === 1) {
-          filterValues[i] = 0;
-        }
-      }
-      map.set(tileKey, filterValues);
+      map.set(
+        keyFromTile(tile),
+        new Float64Array([
+          1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 1, 0,
+          tile.origin[0], tile.origin[1], tile.origin[2], 1,
+        ])
+      );
     });
     return map;
-  }, [renderData, patches.deleted]);
+  }, [renderData]);
 
   const buildSelectionItem = useCallback(
     (
@@ -365,16 +355,34 @@ export const Viewer = () => {
     []
   );
 
+  const handleSelectionChange = useCallback(
+    (items: SelectionItem[]) => {
+      dispatch({ type: "set-selection", selection: { items } });
+    },
+    [dispatch]
+  );
+
+  const { selectionRect, handlers: selectionHandlers } = useRectangleSelection({
+    editMode,
+    containerRef,
+    deckRef,
+    pointLayerIds,
+    tileByLayerId,
+    buildSelectionItem,
+    onSelectionChange: handleSelectionChange,
+  });
+
   const applyDeleteItems = useCallback(
     (items: SelectionItem[]) => {
       if (items.length === 0) {
         return;
       }
-      const nextDeleted = new Map(patches.deleted);
-      let updated = false;
+      const grouped = new Map<
+        string,
+        { tile: TileRenderData; indices: Set<number> }
+      >();
       items.forEach((item) => {
-        const nodeKey = item.nodeId;
-        const tileKey = item.tileKey ?? nodeKey;
+        const tileKey = item.tileKey ?? item.nodeId;
         const tile = tileByKey.get(tileKey);
         if (!tile) {
           return;
@@ -382,20 +390,79 @@ export const Viewer = () => {
         if (item.index < 0 || item.index >= tile.pointCount) {
           return;
         }
-        const existingMask = nextDeleted.get(nodeKey);
-        const nextMask =
-          existingMask && existingMask.length === tile.pointCount
-            ? new Uint8Array(existingMask)
-            : new Uint8Array(tile.pointCount);
-        nextMask[item.index] = 1;
-        nextDeleted.set(nodeKey, nextMask);
-        updated = true;
+        const entry = grouped.get(tileKey) ?? {
+          tile,
+          indices: new Set<number>(),
+        };
+        entry.indices.add(item.index);
+        grouped.set(tileKey, entry);
       });
+
+      if (grouped.size === 0) {
+        return;
+      }
+
+      const nextDeleted = new Map(patches.deleted);
+      const nextVersions = new Map(patches.deletedVersions);
+      let updated = false;
+      grouped.forEach((entry, tileKey) => {
+        const current = nextDeleted.get(tileKey);
+        const { mask, deletedDelta } = applyDeletesToVisibilityMask(
+          current,
+          entry.tile.pointCount,
+          entry.indices
+        );
+        if (deletedDelta === 0) {
+          return;
+        }
+        const view = mask;
+        nextDeleted.set(tileKey, mask);
+        nextVersions.set(tileKey, (nextVersions.get(tileKey) ?? 0) + 1);
+        updated = true;
+
+        if (settings.debugEnabled) {
+          let deletedCount = 0;
+          for (let i = 0; i < view.length; i += 1) {
+            if (view[i] === 0) {
+              deletedCount += 1;
+            }
+          }
+          console.info("[delete] visibility mask updated", {
+            tileKey,
+            pointCount: view.length,
+            deletedDelta,
+            deletedCount,
+            sample: {
+              first: view[0],
+              middle: view[Math.floor(view.length / 2)],
+              last: view[view.length - 1],
+            },
+          });
+          if (deletedCount === view.length && deletedDelta < view.length) {
+            console.warn("[delete] visibilityMask all zeros", {
+              tileKey,
+              deletedCount,
+              pointCount: view.length,
+            });
+          }
+        }
+      });
+
       if (updated) {
-        dispatch({ type: "set-deleted-masks", deleted: nextDeleted });
+        dispatch({
+          type: "set-deleted-masks",
+          deleted: nextDeleted,
+          deletedVersions: nextVersions,
+        });
       }
     },
-    [dispatch, patches.deleted, tileByKey]
+    [
+      dispatch,
+      patches.deleted,
+      patches.deletedVersions,
+      settings.debugEnabled,
+      tileByKey,
+    ]
   );
 
   useEffect(() => {
@@ -685,130 +752,6 @@ export const Viewer = () => {
     }
     applyDeleteItems(state.selection.items);
   }, [applyDeleteItems, deleteSelectionRequestId, editMode, state.selection.items]);
-
-  const getLocalPoint = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      const element = containerRef.current;
-      if (!element) {
-        return { x: 0, y: 0 };
-      }
-      const rect = element.getBoundingClientRect();
-      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
-      return { x, y };
-    },
-    []
-  );
-
-  const commitRectangleSelection = useCallback(
-    (rect: { x: number; y: number; width: number; height: number }) => {
-      if (!deckRef.current || pointLayerIds.length === 0) {
-        dispatch({ type: "set-selection", selection: { items: [] } });
-        return;
-      }
-      const picks = deckRef.current.pickObjects({
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        width: Math.max(1, Math.round(rect.width)),
-        height: Math.max(1, Math.round(rect.height)),
-        layerIds: pointLayerIds,
-      });
-      const selected = new Map<string, SelectionItem>();
-      picks.forEach((info) => {
-        if (info.index === undefined || info.index < 0) {
-          return;
-        }
-        const layerId = info.layer?.id;
-        if (!layerId) {
-          return;
-        }
-        const tile = tileByLayerId.get(layerId);
-        if (!tile) {
-          return;
-        }
-        const item = buildSelectionItem(
-          tile,
-          info.index,
-          Array.isArray(info.coordinate) ? info.coordinate : null
-        );
-        const key = `${item.nodeId}:${item.index}`;
-        if (!selected.has(key)) {
-          selected.set(key, item);
-        }
-      });
-      dispatch({
-        type: "set-selection",
-        selection: { items: Array.from(selected.values()) },
-      });
-    },
-    [buildSelectionItem, dispatch, pointLayerIds, tileByLayerId]
-  );
-
-  const handleSelectionMouseDown = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (editMode !== "select" || !event.shiftKey || event.button !== 0) {
-        return;
-      }
-      const start = getLocalPoint(event);
-      selectionStartRef.current = start;
-      setSelectionRect({ x: start.x, y: start.y, width: 0, height: 0 });
-      event.preventDefault();
-      event.stopPropagation();
-    },
-    [editMode, getLocalPoint]
-  );
-
-  const handleSelectionMouseMove = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (!selectionStartRef.current) {
-        return;
-      }
-      const current = getLocalPoint(event);
-      const start = selectionStartRef.current;
-      const rect = {
-        x: Math.min(start.x, current.x),
-        y: Math.min(start.y, current.y),
-        width: Math.abs(current.x - start.x),
-        height: Math.abs(current.y - start.y),
-      };
-      setSelectionRect(rect);
-      event.preventDefault();
-      event.stopPropagation();
-    },
-    [getLocalPoint]
-  );
-
-  const handleSelectionMouseUp = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (!selectionStartRef.current) {
-        return;
-      }
-      const end = getLocalPoint(event);
-      const start = selectionStartRef.current;
-      selectionStartRef.current = null;
-      const rect = {
-        x: Math.min(start.x, end.x),
-        y: Math.min(start.y, end.y),
-        width: Math.abs(end.x - start.x),
-        height: Math.abs(end.y - start.y),
-      };
-      setSelectionRect(null);
-      commitRectangleSelection(rect);
-      event.preventDefault();
-      event.stopPropagation();
-    },
-    [commitRectangleSelection, getLocalPoint]
-  );
-
-  const handleSelectionMouseLeave = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      if (!selectionStartRef.current) {
-        return;
-      }
-      handleSelectionMouseUp(event);
-    },
-    [handleSelectionMouseUp]
-  );
 
   const handleTileLoaded = useCallback(() => {
     syncRetainedNodes({ allowPrune: true });
@@ -1188,7 +1131,6 @@ export const Viewer = () => {
   const handleHover = useCallback(
     (tile: TileRenderData, info: PickingInfo, event?: unknown) => {
       void event;
-      void event;
       if (info.index === undefined || info.index < 0) {
         dispatch({ type: "set-hover", hover: null });
         return;
@@ -1272,7 +1214,9 @@ export const Viewer = () => {
       const pickable = forcePicking ? true : !isInteracting;
       const autoHighlight = forcePicking ? false : !isInteracting;
       const pointSize = isInteracting ? 1 : 2;
-      const filterValues = filterValuesByTileKey.get(layerKey);
+      const modelMatrix = modelMatrixByKey.get(layerKey);
+      const filterValues = patches.deleted.get(layerKey);
+      const filterVersion = patches.deletedVersions.get(layerKey);
       return createPointCloudLayer(
         tile,
         {
@@ -1284,7 +1228,9 @@ export const Viewer = () => {
           pickable,
           autoHighlight,
           pointSize,
+          modelMatrix,
           filterValues,
+          filterVersion,
         }
       );
     });
@@ -1296,7 +1242,9 @@ export const Viewer = () => {
     handleClick,
     forcePicking,
     isInteracting,
-    filterValuesByTileKey,
+    patches.deleted,
+    patches.deletedVersions,
+    modelMatrixByKey,
   ]);
 
   const patchLayers = useMemo(
@@ -1363,10 +1311,10 @@ export const Viewer = () => {
     <div
       className="viewer-root"
       ref={containerRef}
-      onMouseDownCapture={handleSelectionMouseDown}
-      onMouseMoveCapture={handleSelectionMouseMove}
-      onMouseUpCapture={handleSelectionMouseUp}
-      onMouseLeave={handleSelectionMouseLeave}
+      onMouseDownCapture={selectionHandlers.onMouseDownCapture}
+      onMouseMoveCapture={selectionHandlers.onMouseMoveCapture}
+      onMouseUpCapture={selectionHandlers.onMouseUpCapture}
+      onMouseLeave={selectionHandlers.onMouseLeave}
     >
       <DeckGL
         ref={deckRef}

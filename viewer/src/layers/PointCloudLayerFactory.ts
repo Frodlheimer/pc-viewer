@@ -9,7 +9,7 @@ type BinaryAttributes = {
   attributes: {
     getPosition: { value: Float32Array; size: 3 };
     getColor?: { value: Uint8Array; size: 3; normalized: true };
-    getFilterValue?: { value: Uint8Array; size: 1; normalized?: boolean };
+    filterValues?: { value: Float32Array; size: 1 };
   };
 };
 
@@ -23,7 +23,8 @@ export type PointCloudLayerOptions = {
   pickable?: boolean;
   autoHighlight?: boolean;
   pointSize?: number;
-  filterValues?: Uint8Array;
+  modelMatrix?: Float32Array | Float64Array;
+  filterValues?: Float32Array;
   filterVersion?: number;
 };
 
@@ -45,10 +46,9 @@ export const createPointCloudLayer = (
   }
   const filterValues = options.filterValues;
   if (filterValues) {
-    attributes.getFilterValue = {
+    attributes.filterValues = {
       value: filterValues,
       size: 1,
-      normalized: false,
     };
   }
 
@@ -73,8 +73,9 @@ export const createPointCloudLayer = (
     pickable,
     autoHighlight: options.autoHighlight ?? pickable,
     pointSize: options.pointSize ?? 2,
+    modelMatrix: options.modelMatrix,
     getFilterValue: filterValues
-      ? (_d, info) => filterValues[info.index] ?? 1
+      ? (_d, info: { index: number }) => filterValues[info.index] ?? 1
       : undefined,
     filterEnabled: Boolean(filterValues),
     filterRange: filterValues ? [0.5, 1.5] : undefined,

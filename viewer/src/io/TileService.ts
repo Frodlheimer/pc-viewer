@@ -26,21 +26,41 @@ const cloneTypedArray = (value: TypedArray): TypedArray => {
   return new ctor(value);
 };
 
+const getRawBufferBase = (rawBuffer: ArrayBuffer | Uint8Array | undefined) =>
+  rawBuffer instanceof Uint8Array ? rawBuffer.buffer : rawBuffer;
+
 const detachOptionalFromRawBuffer = (entry: CachedTileEntry) => {
-  if (!entry.rawBuffer || entry.decodedOptional.size === 0) {
+  const rawBuffer = getRawBufferBase(entry.rawBuffer);
+  if (!rawBuffer || entry.decodedOptional.size === 0) {
     return;
   }
   entry.decodedOptional.forEach((value, name) => {
-    if (value.buffer === entry.rawBuffer) {
+    if (value.buffer === rawBuffer) {
       entry.decodedOptional.set(name, cloneTypedArray(value));
     }
   });
+};
+
+const detachMandatoryFromRawBuffer = (entry: CachedTileEntry) => {
+  const rawBuffer = getRawBufferBase(entry.rawBuffer);
+  if (!rawBuffer) {
+    return;
+  }
+  const positions = entry.renderData.positions;
+  if (positions.buffer === rawBuffer) {
+    entry.renderData.positions = positions.slice();
+  }
+  const colors = entry.renderData.colors;
+  if (colors && colors.buffer === rawBuffer) {
+    entry.renderData.colors = colors.slice();
+  }
 };
 
 const dropEntryRawBuffer = (entry: CachedTileEntry) => {
   if (!entry.rawBuffer) {
     return;
   }
+  detachMandatoryFromRawBuffer(entry);
   detachOptionalFromRawBuffer(entry);
   entry.rawBuffer = undefined;
 };
@@ -58,7 +78,7 @@ const estimateTileBytes = (entry: CachedTileEntry) => {
     addBuffer(entry.renderData.colors.buffer);
   }
   if (entry.rawBuffer) {
-    addBuffer(entry.rawBuffer);
+    addBuffer(getRawBufferBase(entry.rawBuffer));
   }
   entry.decodedOptional.forEach((array) => {
     addBuffer(array.buffer);
@@ -371,7 +391,9 @@ export class TileService {
       });
   }
 
-  private async fetchTileBuffer(entry: CachedTileEntry): Promise<ArrayBuffer> {
+  private async fetchTileBuffer(
+    entry: CachedTileEntry
+  ): Promise<ArrayBuffer | Uint8Array> {
     if (entry.source.format !== "pct2") {
       throw new Error("Optional attributes supported only for PCT2 tiles.");
     }

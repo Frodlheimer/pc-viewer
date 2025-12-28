@@ -215,6 +215,7 @@ const deriveMaxNodes = (budgets: RuntimeBudgets) => {
 type QueueItem = {
   node: NodeRecord;
   priority: number;
+  tieBreaker: string;
 };
 
 class MaxHeap {
@@ -245,7 +246,7 @@ class MaxHeap {
   private bubbleUp(index: number) {
     while (index > 0) {
       const parent = Math.floor((index - 1) / 2);
-      if (this.items[parent].priority >= this.items[index].priority) {
+      if (!this.isHigherPriority(this.items[index], this.items[parent])) {
         break;
       }
       [this.items[parent], this.items[index]] = [
@@ -262,10 +263,16 @@ class MaxHeap {
       const left = index * 2 + 1;
       const right = index * 2 + 2;
       let largest = index;
-      if (left < length && this.items[left].priority > this.items[largest].priority) {
+      if (
+        left < length &&
+        this.isHigherPriority(this.items[left], this.items[largest])
+      ) {
         largest = left;
       }
-      if (right < length && this.items[right].priority > this.items[largest].priority) {
+      if (
+        right < length &&
+        this.isHigherPriority(this.items[right], this.items[largest])
+      ) {
         largest = right;
       }
       if (largest === index) {
@@ -277,6 +284,13 @@ class MaxHeap {
       ];
       index = largest;
     }
+  }
+
+  private isHigherPriority(a: QueueItem, b: QueueItem) {
+    if (a.priority !== b.priority) {
+      return a.priority > b.priority;
+    }
+    return a.tieBreaker > b.tieBreaker;
   }
 }
 
@@ -357,7 +371,11 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
   const queue = new MaxHeap();
   roots.forEach((node) => {
     const info = getInfo(node);
-    queue.push({ node, priority: info.pixelRadius });
+    queue.push({
+      node,
+      priority: info.pixelRadius,
+      tieBreaker: keyFromNodeId(node.nodeId),
+    });
   });
 
   const selected: SelectedNode[] = [];
@@ -432,12 +450,14 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
         selectedLevels[node.level] = (selectedLevels[node.level] ?? 0) + 1;
         reasonCounts.selected += 1;
       }
-      children
-        .slice()
-        .sort((a, b) => getInfo(b).pixelRadius - getInfo(a).pixelRadius)
-        .forEach((child) => {
-          queue.push({ node: child, priority: getInfo(child).pixelRadius });
+      children.forEach((child) => {
+        const childInfo = getInfo(child);
+        queue.push({
+          node: child,
+          priority: childInfo.pixelRadius,
+          tieBreaker: keyFromNodeId(child.nodeId),
         });
+      });
       continue;
     }
 

@@ -1,4 +1,4 @@
-import { fetchRange } from "./RangeFetch";
+import { fetchRangeView } from "./RangeFetch";
 import type { NodeRecord, Page } from "../types/Hierarchy";
 
 const PAGE_HEADER_BYTES = 20;
@@ -34,11 +34,18 @@ const touchCache = (key: string, page: Page) => {
   }
 };
 
-const parseHeader = (buffer: ArrayBuffer) => {
+type BufferSource = ArrayBuffer | Uint8Array;
+
+const toDataView = (buffer: BufferSource) =>
+  buffer instanceof Uint8Array
+    ? new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+    : new DataView(buffer);
+
+const parseHeader = (buffer: BufferSource) => {
   if (buffer.byteLength < PAGE_HEADER_BYTES) {
     throw new Error("Hierarchy page header truncated.");
   }
-  const view = new DataView(buffer);
+  const view = toDataView(buffer);
   const magic = String.fromCharCode(
     view.getUint8(0),
     view.getUint8(1),
@@ -69,13 +76,16 @@ const parseHeader = (buffer: ArrayBuffer) => {
   return { pageBytes, pageIndex, recordCount };
 };
 
-const parseRecords = (buffer: ArrayBuffer, recordCount: number): NodeRecord[] => {
+const parseRecords = (
+  buffer: BufferSource,
+  recordCount: number
+): NodeRecord[] => {
   const requiredBytes = PAGE_HEADER_BYTES + recordCount * NODE_RECORD_BYTES;
   if (buffer.byteLength < requiredBytes) {
     throw new Error("Hierarchy page truncated.");
   }
 
-  const view = new DataView(buffer);
+  const view = toDataView(buffer);
   const records: NodeRecord[] = [];
   let offset = PAGE_HEADER_BYTES;
 
@@ -138,7 +148,9 @@ const resolvePageBytes = async (url: string, pageBytes?: number) => {
     return cached;
   }
 
-  const headerBuffer = await fetchRange(url, 0, PAGE_HEADER_BYTES);
+  const headerBuffer = await fetchRangeView(url, 0, PAGE_HEADER_BYTES, undefined, {
+    allowFullFileFallback: false,
+  });
   const header = parseHeader(headerBuffer);
   pageBytesByUrl.set(url, header.pageBytes);
   return header.pageBytes;
@@ -169,12 +181,11 @@ export const loadPage = async (
     return cached;
   }
 
-  const pageBytes = await resolvePageBytes(
-    url,
-    options?.pageBytes ?? DEFAULT_PAGE_BYTES
-  );
+  const pageBytes = await resolvePageBytes(url, options?.pageBytes);
   const start = pageIndex * pageBytes;
-  const buffer = await fetchRange(url, start, pageBytes);
+  const buffer = await fetchRangeView(url, start, pageBytes, undefined, {
+    allowFullFileFallback: false,
+  });
   const header = parseHeader(buffer);
 
   if (header.pageIndex !== pageIndex) {

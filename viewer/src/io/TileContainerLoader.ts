@@ -1,4 +1,4 @@
-import { fetchRange, getKnownTotalSize } from "./RangeFetch";
+import { fetchRangeView, getKnownTotalSize } from "./RangeFetch";
 import { parsePct2Tile } from "./Pct2TileLoader";
 
 type TileRangeContext = {
@@ -12,7 +12,7 @@ export const loadTileBufferFromContainer = async (
   length: number,
   signal?: AbortSignal,
   context?: TileRangeContext
-) => {
+): Promise<Uint8Array> => {
   if (offset < 0 || length <= 0) {
     const message = "Tile container range invalid.";
     console.error("[container] invalid range", {
@@ -39,7 +39,9 @@ export const loadTileBufferFromContainer = async (
   }
 
   try {
-    const buffer = await fetchRange(containerUrl, offset, length, signal);
+    const buffer = await fetchRangeView(containerUrl, offset, length, signal, {
+      allowFullFileFallback: false,
+    });
     if (import.meta.env.DEV) {
       console.info("[container] tile loaded", { containerUrl, offset, length });
     }

@@ -14,7 +14,7 @@ export type CachedTileEntry = {
   key: string;
   renderData: TileRenderData;
   directory?: Pct2Directory;
-  rawBuffer?: ArrayBuffer;
+  rawBuffer?: ArrayBuffer | Uint8Array;
   decodedOptional: Map<string, TypedArray>;
   source: TileSource;
   lastOptionalAccess?: number;

@@ -19,7 +19,10 @@ export const Sidebar = () => {
     hoverTileEntry &&
     typeof hoverTileEntry === "object" &&
     "rawBuffer" in hoverTileEntry
-      ? (hoverTileEntry as { rawBuffer?: ArrayBuffer; decodedOptional?: Map<string, unknown> })
+      ? (hoverTileEntry as {
+          rawBuffer?: ArrayBuffer | Uint8Array;
+          decodedOptional?: Map<string, unknown>;
+        })
       : null;
   const addedCount = Math.floor(
     state.patches.addedPoints.positions.length / 3
@@ -28,7 +31,7 @@ export const Sidebar = () => {
     ? Array.from(state.patches.deleted.values()).reduce((sum, mask) => {
         let count = 0;
         for (let i = 0; i < mask.length; i += 1) {
-          if (mask[i] === 1) {
+          if (mask[i] === 0) {
             count += 1;
           }
         }

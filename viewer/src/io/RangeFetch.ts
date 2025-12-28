@@ -1,6 +1,12 @@
 const WINDOW_BYTES = 16 * 1024 * 1024;
 const MAX_WINDOWS_PER_URL = 8;
 const MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const DEFAULT_FULL_FILE_FALLBACK_BYTES = 32 * 1024 * 1024;
+
+export type RangeFetchOptions = {
+  allowFullFileFallback?: boolean;
+  maxFullFileBytes?: number;
+};
 
 type WindowEntry = {
   url: string;
@@ -207,10 +213,22 @@ const storeWindow = (
   return entry;
 };
 
+const shouldAllowFullFileFallback = (
+  options: RangeFetchOptions | undefined,
+  byteLength: number
+) => {
+  if (!options?.allowFullFileFallback) {
+    return false;
+  }
+  const maxBytes = options.maxFullFileBytes ?? DEFAULT_FULL_FILE_FALLBACK_BYTES;
+  return byteLength <= maxBytes;
+};
+
 const fetchWindow = async (
   url: string,
   windowStart: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: RangeFetchOptions
 ) => {
   const windowEnd = windowStart + WINDOW_BYTES - 1;
   let response: Response;
@@ -246,6 +264,17 @@ const fetchWindow = async (
   const contentRange = response.headers.get("Content-Range");
   const buffer = await response.arrayBuffer();
   if (response.status === 200) {
+    if (!shouldAllowFullFileFallback(options, buffer.byteLength)) {
+      console.error("[range] server does not support range requests", {
+        url,
+        windowStart,
+        windowEnd,
+        status: response.status,
+        contentRange,
+        byteLength: buffer.byteLength,
+      });
+      throw new Error("Server does not support Range Requests (206).");
+    }
     updateKnownTotalSize(url, buffer.byteLength);
     const entry = storeWindow(url, 0, buffer, {
       isFullFile: true,
@@ -274,7 +303,8 @@ const fetchWindow = async (
 const getWindow = async (
   url: string,
   windowStart: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: RangeFetchOptions
 ) => {
   const fullEntry = getFullFileEntry(url);
   if (fullEntry) {
@@ -297,7 +327,7 @@ const getWindow = async (
   if (existing) {
     return existing;
   }
-  const promise = fetchWindow(url, windowStart, signal).finally(() => {
+  const promise = fetchWindow(url, windowStart, signal, options).finally(() => {
     inFlight.delete(key);
   });
   inFlight.set(key, promise);
@@ -315,7 +345,8 @@ export const fetchRange = async (
   url: string,
   start: number,
   length: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: RangeFetchOptions
 ): Promise<ArrayBuffer> => {
   if (start < 0 || length <= 0) {
     throw new Error("Invalid range request.");
@@ -338,7 +369,7 @@ export const fetchRange = async (
   while (offset < length) {
     const rangeStart = start + offset;
     const windowStart = Math.floor(rangeStart / WINDOW_BYTES) * WINDOW_BYTES;
-    const windowEntry = await getWindow(url, windowStart, signal);
+    const windowEntry = await getWindow(url, windowStart, signal, options);
     const inWindowOffset = rangeStart - windowEntry.windowStart;
     const remaining = length - offset;
     const windowAvailable = windowEntry.buffer.byteLength - inWindowOffset;
@@ -365,6 +396,58 @@ export const fetchRange = async (
     offset += available;
   }
   return result.buffer;
+};
+
+export const fetchRangeView = async (
+  url: string,
+  start: number,
+  length: number,
+  signal?: AbortSignal,
+  options?: RangeFetchOptions
+): Promise<Uint8Array> => {
+  if (start < 0 || length <= 0) {
+    throw new Error("Invalid range request.");
+  }
+
+  const totalSize = getKnownTotalSize(url);
+  if (totalSize !== null && start + length > totalSize) {
+    logRangeFailure({
+      url,
+      start,
+      length,
+      totalSize,
+      reason: "range exceeds known payload size",
+    });
+    throw new Error("Range slice exceeds payload size.");
+  }
+
+  const windowStart = Math.floor(start / WINDOW_BYTES) * WINDOW_BYTES;
+  const windowEntry = await getWindow(url, windowStart, signal, options);
+  const inWindowOffset = start - windowEntry.windowStart;
+  const windowAvailable = windowEntry.buffer.byteLength - inWindowOffset;
+  const requestedEnd = start + length - 1;
+  if (inWindowOffset < 0 || windowAvailable <= 0) {
+    logRangeFailure({
+      url,
+      start,
+      length,
+      windowStart,
+      requestedWindowEnd: windowStart + WINDOW_BYTES - 1,
+      bufferByteLength: windowEntry.buffer.byteLength,
+      windowActualEnd: windowEntry.windowActualEnd,
+      responseStatus: windowEntry.responseStatus,
+      contentRange: windowEntry.contentRange,
+      reason: "window does not cover requested range",
+    });
+    throw new Error("Range slice exceeds payload size.");
+  }
+
+  if (requestedEnd <= windowEntry.windowActualEnd) {
+    return new Uint8Array(windowEntry.buffer, inWindowOffset, length);
+  }
+
+  const buffer = await fetchRange(url, start, length, signal, options);
+  return new Uint8Array(buffer);
 };
 
 export const getRangeWindowStats = () => {

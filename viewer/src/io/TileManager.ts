@@ -23,6 +23,8 @@ import {
 import { loadTileBufferFromContainer } from "./TileContainerLoader";
 import { keyFromNodeId } from "../utils/nodeKey";
 
+type BufferSource = ArrayBuffer | Uint8Array;
+
 const hashStringToNodeId = (value: string): number => {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i += 1) {
@@ -125,7 +127,7 @@ const loadPct1RenderData = async (
 const loadPct2Buffer = async (
   tile: TileManifest,
   signal?: AbortSignal
-): Promise<ArrayBuffer> => {
+): Promise<BufferSource> => {
   if (tile.containerUrl) {
     if (tile.byteOffset === undefined || tile.byteLength === undefined) {
       throw new Error("Tile container reference missing byte range.");
@@ -142,7 +144,7 @@ const loadPct2Buffer = async (
 };
 
 const decodePct2MandatoryData = (
-  buffer: ArrayBuffer,
+  buffer: BufferSource,
   tile: TileManifest,
   roles: DatasetRoles
 ) => {

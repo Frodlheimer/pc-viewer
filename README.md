@@ -1,33 +1,32 @@
-# Codex Prompt Pack (PCT2 int32+scale) – for your Point-Cloud Viewer
+# Point Cloud Viewer
 
-This pack contains **copy/paste prompts** you run in **Codex inside VS Code** to evolve your current project towards:
-- PCT2 binary tiles (int32 positions + origin/scale)
-- tile-based rendering (no global merge)
-- range-request tile containers
-- binary hierarchy paging
-- patch-based edits (delta layer)
+Web-based viewer for large point clouds built with React + TypeScript + Vite + deck.gl.
+Supports streaming tiles (PCT1/PCT2), binary hierarchy paging (PCH1), range requests,
+and patch-based edits (add/delete/update) without rewriting base tiles.
 
-## How to use (VS Code + Codex)
-1. Unzip this folder into your repo root (so you get `AGENTS.md`, `docs/spec/*`, `tasks/*`).
-2. Commit it to GitHub.
-3. In VS Code, open one task file under `tasks/` and **paste the entire prompt** into Codex (one task at a time).
-4. After each task, run:
-   - `npm run lint`
-   - `npm run build`
-   - `npm run dev` (verify demo renders & picking works)
-
-## Branching suggestion
+## Quick start
 ```bash
-git checkout -b feat/pct2-v0
-git add -A
-git commit -m "Add Codex prompt pack + specs"
-git push -u origin feat/pct2-v0
+cd viewer
+npm install
+npm run dev
 ```
 
-## Task order
-Run tasks in numeric order:
-- 01 -> 08
+## Verify
+```bash
+cd viewer
+npm run lint
+npm run build
+```
 
-## Notes
-- Prompts assume your current files exist (Viewer.tsx, TileManager.ts, TileLoader.ts, store.tsx, etc.).
-  If your repo uses a `src/` folder, Codex should locate files via search and apply changes in the correct paths.
+## Repo structure
+- `viewer/` React app (rendering, UI, streaming)
+- `docs/spec/` Binary format specs (PCT2, hierarchy paging, edit patches)
+- `docs/architecture/` System overview and invariants
+- `tools/` Dataset generation helpers
+- `tasks/` Historical Codex task prompts (optional reference)
+
+## Key docs
+- `docs/architecture/overview.md`
+- `docs/spec/pct2.md`
+- `docs/spec/hierarchy_paging.md`
+- `docs/spec/edit_patches.md`

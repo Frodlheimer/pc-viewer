@@ -10,10 +10,17 @@ import {
 
 const MAGIC = "PCT2";
 const FIXED_HEADER_BYTES = 76;
+const DECODER = new TextDecoder();
+
+type BufferSource = ArrayBuffer | Uint8Array;
 
 type AnyTypedArrayConstructor = {
   BYTES_PER_ELEMENT: number;
-  new (buffer: ArrayBuffer, byteOffset: number, length: number): TypedArray;
+  new (
+    buffer: ArrayBufferLike,
+    byteOffset: number,
+    length: number
+  ): TypedArray;
 };
 
 const TYPE_INFO: Record<number, AnyTypedArrayConstructor> = {
@@ -41,8 +48,14 @@ const readVec3 = (view: DataView, offset: number): [number, number, number] => [
   view.getFloat64(offset + 16, true),
 ];
 
-const decodeName = (buffer: ArrayBuffer, offset: number, length: number) =>
-  new TextDecoder().decode(new Uint8Array(buffer, offset, length));
+const getSourceBuffer = (buffer: BufferSource) =>
+  buffer instanceof Uint8Array ? buffer.buffer : buffer;
+
+const getSourceOffset = (buffer: BufferSource) =>
+  buffer instanceof Uint8Array ? buffer.byteOffset : 0;
+
+const decodeName = (buffer: ArrayBufferLike, offset: number, length: number) =>
+  DECODER.decode(new Uint8Array(buffer, offset, length));
 
 const toNodeId = (value: bigint): bigint | number =>
   value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value;
@@ -57,7 +70,7 @@ const decodePositions = (
     if (attribute.length < elementCount) {
       throw new Error("PCT2 position attribute truncated.");
     }
-    return attribute.slice(0, elementCount);
+    return attribute.subarray(0, elementCount);
   }
 
   if (!(attribute instanceof Int32Array)) {
@@ -91,13 +104,15 @@ type MandatoryDecodeResult = {
 };
 
 export const parsePct2HeaderAndDirectory = (
-  buffer: ArrayBuffer
+  buffer: BufferSource
 ): { header: Pct2Header; directory: Pct2Directory } => {
   if (buffer.byteLength < FIXED_HEADER_BYTES) {
     throw new Error("PCT2 header truncated.");
   }
 
-  const view = new DataView(buffer);
+  const sourceBuffer = getSourceBuffer(buffer);
+  const sourceOffset = getSourceOffset(buffer);
+  const view = new DataView(sourceBuffer, sourceOffset, buffer.byteLength);
   const magic = readMagic(view);
   if (magic !== MAGIC) {
     throw new Error(`PCT2 magic mismatch (${magic}).`);
@@ -154,7 +169,7 @@ export const parsePct2HeaderAndDirectory = (
       throw new Error("PCT2 attribute name exceeds header.");
     }
 
-    const name = decodeName(buffer, cursor, nameLen);
+    const name = decodeName(sourceBuffer, sourceOffset + cursor, nameLen);
     cursor += nameLen;
 
     const requiredBytes = 1 + 1 + 1 + 1 + 4 + 4 + 4;
@@ -244,10 +259,12 @@ export const parsePct2HeaderAndDirectory = (
 };
 
 export const decodePct2Attributes = (
-  buffer: ArrayBuffer,
+  buffer: BufferSource,
   directory: Pct2Directory,
   attrNames: string[]
 ): Record<string, TypedArray> => {
+  const sourceBuffer = getSourceBuffer(buffer);
+  const sourceOffset = getSourceOffset(buffer);
   const attributes: Record<string, TypedArray> = {};
   const uniqueNames = Array.from(new Set(attrNames));
   for (const name of uniqueNames) {
@@ -267,13 +284,17 @@ export const decodePct2Attributes = (
     if (entry.payloadOffset + entry.byteLength > buffer.byteLength) {
       throw new Error("PCT2 attribute block out of range.");
     }
-    attributes[name] = new ArrayType(buffer, entry.payloadOffset, elementCount);
+    attributes[name] = new ArrayType(
+      sourceBuffer,
+      sourceOffset + entry.payloadOffset,
+      elementCount
+    );
   }
   return attributes;
 };
 
 export const decodePct2Mandatory = (
-  buffer: ArrayBuffer,
+  buffer: BufferSource,
   directory: Pct2Directory,
   options: MandatoryDecodeOptions
 ): MandatoryDecodeResult => {
@@ -304,7 +325,7 @@ export const decodePct2Mandatory = (
       if (rawColor.length < directory.header.pointCount * 3) {
         throw new Error("PCT2 rgb attribute truncated.");
       }
-      colors = rawColor.slice();
+      colors = rawColor.subarray(0, directory.header.pointCount * 3);
     }
   }
 
@@ -316,7 +337,7 @@ export const decodePct2Mandatory = (
   };
 };
 
-export const parsePct2TileEager = (buffer: ArrayBuffer): ParsedTile2 => {
+export const parsePct2TileEager = (buffer: BufferSource): ParsedTile2 => {
   const { header, directory } = parsePct2HeaderAndDirectory(buffer);
   const attrNames = directory.attributes.map((entry) => entry.name);
   const attributes = decodePct2Attributes(buffer, directory, attrNames);
@@ -337,7 +358,7 @@ export const parsePct2TileEager = (buffer: ArrayBuffer): ParsedTile2 => {
   };
 };
 
-export const parsePct2Tile = (buffer: ArrayBuffer): ParsedTile2 => {
+export const parsePct2Tile = (buffer: BufferSource): ParsedTile2 => {
   const { header, directory } = parsePct2HeaderAndDirectory(buffer);
   const mandatory = decodePct2Mandatory(buffer, directory, {
     positionName: "position",
