@@ -22,6 +22,7 @@ const comparePriority: QueueComparator = (a, b) => {
     return a.pixelRadius > b.pixelRadius ? 1 : -1;
   }
   if (a.level !== b.level) {
+    // Prefer coarser tiles first when screen-space size ties (progressive refinement, more stable visuals).
     return a.level < b.level ? 1 : -1;
   }
   if (a.distance !== b.distance) {

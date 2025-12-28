@@ -1,3 +1,4 @@
+import { decompress } from "fzstd";
 import {
   AttributeTypeEnum,
   CodecEnum,
@@ -208,15 +209,21 @@ export const parsePct2HeaderAndDirectory = (
       throw new Error("PCT2 attribute block out of range.");
     }
 
-    if (codec !== CodecEnum.None) {
+    if (codec !== CodecEnum.None && codec !== CodecEnum.Zstd) {
       throw new Error(`PCT2 codec ${codec} not supported.`);
     }
 
-    if (
-      uncompressedByteLength !== 0 &&
-      uncompressedByteLength !== byteLength
-    ) {
-      throw new Error("PCT2 uncompressed byte length mismatch.");
+    if (codec === CodecEnum.None) {
+      if (
+        uncompressedByteLength !== 0 &&
+        uncompressedByteLength !== byteLength
+      ) {
+        throw new Error("PCT2 uncompressed byte length mismatch.");
+      }
+    } else if (uncompressedByteLength === 0) {
+      throw new Error(
+        "PCT2 compressed attribute missing uncompressedByteLength."
+      );
     }
 
     const ArrayType = TYPE_INFO[type];
@@ -226,7 +233,7 @@ export const parsePct2HeaderAndDirectory = (
 
     const elementCount = pointCount * components;
     const expectedByteLength = elementCount * ArrayType.BYTES_PER_ELEMENT;
-    if (byteLength < expectedByteLength) {
+    if (codec === CodecEnum.None && byteLength < expectedByteLength) {
       throw new Error("PCT2 attribute payload truncated.");
     }
     if (byName[name]) {
@@ -278,17 +285,53 @@ export const decodePct2Attributes = (
     }
     const elementCount = directory.header.pointCount * entry.components;
     const expectedByteLength = elementCount * ArrayType.BYTES_PER_ELEMENT;
-    if (entry.byteLength < expectedByteLength) {
-      throw new Error("PCT2 attribute payload truncated.");
-    }
     if (entry.payloadOffset + entry.byteLength > buffer.byteLength) {
       throw new Error("PCT2 attribute block out of range.");
     }
-    attributes[name] = new ArrayType(
-      sourceBuffer,
-      sourceOffset + entry.payloadOffset,
-      elementCount
-    );
+
+    if (entry.codec === CodecEnum.None) {
+      if (entry.byteLength < expectedByteLength) {
+        throw new Error("PCT2 attribute payload truncated.");
+      }
+      attributes[name] = new ArrayType(
+        sourceBuffer,
+        sourceOffset + entry.payloadOffset,
+        elementCount
+      );
+      continue;
+    }
+
+    if (entry.codec === CodecEnum.Zstd) {
+      if (entry.uncompressedByteLength !== expectedByteLength) {
+        throw new Error(
+          `PCT2 uncompressed size mismatch for ${name} (${entry.uncompressedByteLength} != ${expectedByteLength}).`
+        );
+      }
+
+      const compressed = new Uint8Array(
+        sourceBuffer,
+        sourceOffset + entry.payloadOffset,
+        entry.byteLength
+      );
+      const decompressed = decompress(compressed);
+      if (decompressed.byteLength < expectedByteLength) {
+        throw new Error(`PCT2 zstd payload truncated for ${name}.`);
+      }
+      const bytes =
+        decompressed.byteLength === expectedByteLength &&
+        decompressed.byteOffset === 0 &&
+        decompressed.buffer.byteLength === expectedByteLength
+          ? decompressed
+          : decompressed.slice(0, expectedByteLength);
+      attributes[name] = new ArrayType(
+        bytes.buffer,
+        bytes.byteOffset,
+        elementCount
+      );
+      continue;
+    }
+
+    throw new Error(`PCT2 codec ${entry.codec} not supported yet (${name}).`);
   }
   return attributes;
 };

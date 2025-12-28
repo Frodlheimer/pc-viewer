@@ -1,4 +1,4 @@
-import { fetchRangeView } from "./RangeFetch";
+import { fetchRangeView, getKnownTotalSize } from "./RangeFetch";
 import type { NodeRecord, Page } from "../types/Hierarchy";
 
 const PAGE_HEADER_BYTES = 20;
@@ -210,4 +210,59 @@ export const loadPage = async (
 
   touchCache(cacheKey, page);
   return page;
+};
+
+export type LoadAllPagesResult = {
+  pageBytes: number;
+  pages: Page[];
+  records: NodeRecord[];
+};
+
+const isRangeEofError = (error: unknown) => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    error.message.includes("Range slice exceeds") ||
+    error.message.includes("Range fetch failed (416)")
+  );
+};
+
+export const loadAllPages = async (
+  url: string,
+  options?: { pageBytes?: number; maxPages?: number }
+): Promise<LoadAllPagesResult> => {
+  const first = await loadPage(url, 0, { pageBytes: options?.pageBytes });
+
+  const pageBytes = first.pageBytes;
+  const totalSize = getKnownTotalSize(url);
+  const pageCountFromSize =
+    totalSize !== null ? Math.ceil(totalSize / pageBytes) : null;
+
+  const hardMax = options?.maxPages ?? 4096;
+  const targetPages =
+    pageCountFromSize !== null ? Math.min(pageCountFromSize, hardMax) : hardMax;
+
+  const pages: Page[] = [first];
+
+  for (let i = 1; i < targetPages; i += 1) {
+    try {
+      const page = await loadPage(url, i, { pageBytes });
+      if (page.recordCount === 0) {
+        break;
+      }
+      pages.push(page);
+    } catch (error) {
+      if (isRangeEofError(error)) {
+        break;
+      }
+      throw error;
+    }
+  }
+
+  return {
+    pageBytes,
+    pages,
+    records: pages.flatMap((page) => page.records),
+  };
 };
