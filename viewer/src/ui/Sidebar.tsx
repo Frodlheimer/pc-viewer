@@ -63,6 +63,7 @@ export const Sidebar = () => {
       tileCache: {
         items: runtimeStats.loadedTiles,
         bytes: runtimeStats.cpuCacheBytes,
+        uniqueBuffers: runtimeStats.cacheUniqueBuffers,
         pinnedItems: runtimeStats.pinnedTiles,
         pinnedBytes: runtimeStats.pinnedBytes,
         rawBufferRetainedCount: runtimeStats.rawBufferRetainedCount,
@@ -71,10 +72,16 @@ export const Sidebar = () => {
           runtimeStats.rawBufferDroppedOnPressureCount,
         rawBufferBytesDropped: runtimeStats.rawBufferBytesDropped,
       },
+      hierarchy: {
+        pagesLoaded: runtimeStats.hierarchyPagesLoaded,
+        inFlight: runtimeStats.hierarchyInFlight,
+        eof: runtimeStats.hierarchyEof,
+      },
       rangeWindowCache: runtimeStats.rangeCache,
       scheduler: {
         queued: runtimeStats.queuedRequests,
         inFlight: runtimeStats.inFlightRequests,
+        canceled: runtimeStats.schedulerCanceled,
       },
       lastSelectionUpdateMs: runtimeStats.lastSelectionUpdateMs,
       lastInteractionMs: runtimeStats.lastInteractionMs,
@@ -286,6 +293,11 @@ export const Sidebar = () => {
               Desired Nodes: {runtimeStats.desiredNodes}
             </div>
             <div className="sidebar-meta">
+              Hierarchy Pages: {runtimeStats.hierarchyPagesLoaded} (in flight{" "}
+              {runtimeStats.hierarchyInFlight}, eof{" "}
+              {runtimeStats.hierarchyEof ? "yes" : "no"})
+            </div>
+            <div className="sidebar-meta">
               Retained Nodes: {runtimeStats.retainedNodes}
             </div>
             <div className="sidebar-meta">
@@ -314,6 +326,9 @@ export const Sidebar = () => {
             </div>
             <div className="sidebar-meta">
               CPU Cache: {runtimeStats.cpuCacheBytes.toLocaleString()} bytes
+            </div>
+            <div className="sidebar-meta">
+              Unique Buffers: {runtimeStats.cacheUniqueBuffers}
             </div>
             <div className="sidebar-meta">
               Pinned Tiles: {runtimeStats.pinnedTiles}
@@ -352,6 +367,9 @@ export const Sidebar = () => {
             </div>
             <div className="sidebar-meta">
               Queued: {runtimeStats.queuedRequests}
+            </div>
+            <div className="sidebar-meta">
+              Canceled: {runtimeStats.schedulerCanceled}
             </div>
             <div className="sidebar-meta">
               Last Selection:{" "}

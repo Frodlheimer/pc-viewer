@@ -10,6 +10,7 @@
     "generate:demo-tiles": "node scripts/generate-demo-tiles.mjs",
     "generate:synth": "node ../tools/generate_synth_dataset.mjs",
     "generate:test5m": "node scripts/generate-demo-tiles.mjs --id test5m --points 5000000 --no-pct1",
+    "generate:test300m": "node ../tools/generate_synth_dataset.mjs --id test300m --name \"Test 300M Dataset\" --points 300000000 --tileCap 500000 --lod 2 --rootPoints 100000",
     "preview": "vite preview",
     "test": "vitest run",
     "bench": "node scripts/bench.mjs"

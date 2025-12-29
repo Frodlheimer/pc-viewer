@@ -12,6 +12,7 @@ type CacheEntry = {
   key: string;
   tile: CachedTileEntry;
   bytesEstimate: number;
+  buffers: ArrayBufferLike[];
   pinned: boolean;
   lastUsed: number;
   prev?: CacheEntry;
@@ -26,6 +27,11 @@ export class TileCache {
   private tail: CacheEntry | null = null;
   private totalBytes = 0;
   private pinnedBytes = 0;
+  private uniqueBuffers = 0;
+  private bufferRefs = new Map<
+    ArrayBufferLike,
+    { bytes: number; refs: number; pinnedRefs: number }
+  >();
   private pinnedItems = 0;
   private lastPinnedWarning = 0;
 
@@ -43,22 +49,22 @@ export class TileCache {
     return this.entries.has(key);
   }
 
-  set(key: string, tile: CachedTileEntry, bytesEstimate: number): void {
+  set(key: string, tile: CachedTileEntry, buffers: ArrayBufferLike[]): void {
+    const uniqueBuffers = Array.from(new Set(buffers));
+    const bytesEstimate = uniqueBuffers.reduce(
+      (sum, buffer) => sum + buffer.byteLength,
+      0
+    );
     const normalizedBytes = Math.max(0, Math.floor(bytesEstimate));
     const now = Date.now();
     const existing = this.entries.get(key);
     if (existing) {
-      this.totalBytes -= existing.bytesEstimate;
-      if (existing.pinned) {
-        this.pinnedBytes -= existing.bytesEstimate;
-      }
+      this.releaseBuffers(existing.buffers, existing.pinned);
       existing.tile = tile;
       existing.bytesEstimate = normalizedBytes;
+      existing.buffers = uniqueBuffers;
       existing.lastUsed = now;
-      this.totalBytes += normalizedBytes;
-      if (existing.pinned) {
-        this.pinnedBytes += normalizedBytes;
-      }
+      this.addBuffers(uniqueBuffers, existing.pinned);
       this.touch(existing);
       return;
     }
@@ -67,11 +73,12 @@ export class TileCache {
       key,
       tile,
       bytesEstimate: normalizedBytes,
+      buffers: uniqueBuffers,
       pinned: false,
       lastUsed: now,
     };
     this.entries.set(key, entry);
-    this.totalBytes += normalizedBytes;
+    this.addBuffers(uniqueBuffers, false);
     this.insertHead(entry);
   }
 
@@ -81,7 +88,7 @@ export class TileCache {
       return;
     }
     entry.pinned = true;
-    this.pinnedBytes += entry.bytesEstimate;
+    this.addPinnedBuffers(entry.buffers);
     this.pinnedItems += 1;
   }
 
@@ -91,7 +98,7 @@ export class TileCache {
       return;
     }
     entry.pinned = false;
-    this.pinnedBytes -= entry.bytesEstimate;
+    this.releasePinnedBuffers(entry.buffers);
     this.pinnedItems -= 1;
   }
 
@@ -117,12 +124,14 @@ export class TileCache {
   stats(): {
     items: number;
     bytes: number;
+    uniqueBuffers: number;
     pinnedItems: number;
     pinnedBytes: number;
   } {
     return {
       items: this.entries.size,
       bytes: this.totalBytes,
+      uniqueBuffers: this.uniqueBuffers,
       pinnedItems: this.pinnedItems,
       pinnedBytes: this.pinnedBytes,
     };
@@ -148,6 +157,8 @@ export class TileCache {
     this.tail = null;
     this.totalBytes = 0;
     this.pinnedBytes = 0;
+    this.uniqueBuffers = 0;
+    this.bufferRefs.clear();
     this.pinnedItems = 0;
   }
 
@@ -201,9 +212,8 @@ export class TileCache {
 
   private removeEntry(entry: CacheEntry) {
     this.entries.delete(entry.key);
-    this.totalBytes -= entry.bytesEstimate;
+    this.releaseBuffers(entry.buffers, entry.pinned);
     if (entry.pinned) {
-      this.pinnedBytes -= entry.bytesEstimate;
       this.pinnedItems -= 1;
     }
     this.detach(entry);
@@ -218,6 +228,76 @@ export class TileCache {
     console.warn("[tile-cache] pinned tiles exceed budget", {
       pinnedBytes: this.pinnedBytes,
       budget,
+    });
+  }
+
+  private addBuffers(buffers: ArrayBufferLike[], pinned: boolean) {
+    buffers.forEach((buffer) => {
+      const existing = this.bufferRefs.get(buffer);
+      if (existing) {
+        existing.refs += 1;
+        if (pinned) {
+          if (existing.pinnedRefs === 0) {
+            this.pinnedBytes += existing.bytes;
+          }
+          existing.pinnedRefs += 1;
+        }
+        return;
+      }
+      const bytes = buffer.byteLength;
+      this.bufferRefs.set(buffer, { bytes, refs: 1, pinnedRefs: pinned ? 1 : 0 });
+      this.uniqueBuffers += 1;
+      this.totalBytes += bytes;
+      if (pinned) {
+        this.pinnedBytes += bytes;
+      }
+    });
+  }
+
+  private releaseBuffers(buffers: ArrayBufferLike[], pinned: boolean) {
+    buffers.forEach((buffer) => {
+      const entry = this.bufferRefs.get(buffer);
+      if (!entry) {
+        return;
+      }
+      if (pinned) {
+        entry.pinnedRefs = Math.max(0, entry.pinnedRefs - 1);
+        if (entry.pinnedRefs === 0) {
+          this.pinnedBytes -= entry.bytes;
+        }
+      }
+      entry.refs = Math.max(0, entry.refs - 1);
+      if (entry.refs === 0) {
+        this.bufferRefs.delete(buffer);
+        this.uniqueBuffers -= 1;
+        this.totalBytes -= entry.bytes;
+      }
+    });
+  }
+
+  private addPinnedBuffers(buffers: ArrayBufferLike[]) {
+    buffers.forEach((buffer) => {
+      const entry = this.bufferRefs.get(buffer);
+      if (!entry) {
+        return;
+      }
+      if (entry.pinnedRefs === 0) {
+        this.pinnedBytes += entry.bytes;
+      }
+      entry.pinnedRefs += 1;
+    });
+  }
+
+  private releasePinnedBuffers(buffers: ArrayBufferLike[]) {
+    buffers.forEach((buffer) => {
+      const entry = this.bufferRefs.get(buffer);
+      if (!entry || entry.pinnedRefs === 0) {
+        return;
+      }
+      entry.pinnedRefs -= 1;
+      if (entry.pinnedRefs === 0) {
+        this.pinnedBytes -= entry.bytes;
+      }
     });
   }
 }

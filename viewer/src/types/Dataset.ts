@@ -95,6 +95,11 @@ export const DATASETS: DatasetOption[] = [
     manifestUrl: "/datasets/demo/manifest.json",
   },
   {
+    id: "test300m",
+    name: "Test 300M Dataset",
+    manifestUrl: "/datasets/test300m/dataset.json",
+  },
+  {
     id: "synth_latest",
     name: "Synth (latest)",
     manifestUrl: "/datasets/synth_latest/dataset.json",

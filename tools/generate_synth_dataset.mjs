@@ -1,5 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { once } from "node:events";
+import { finished } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -52,6 +55,7 @@ const makeTimestamp = () => {
 };
 
 const args = parseArgs();
+const datasetIdOverride = args.get("id");
 const pointCount = Math.max(
   1,
   Math.floor(toNumber(args.get("points"), DEFAULT_POINTS))
@@ -60,6 +64,9 @@ const tileCap = Math.max(
   1,
   Math.floor(toNumber(args.get("tileCap"), DEFAULT_TILE_CAP))
 );
+const rootPointsOverride = args.has("rootPoints")
+  ? Math.max(0, Math.floor(toNumber(args.get("rootPoints"), 0)))
+  : null;
 let lod = Math.floor(toNumber(args.get("lod"), DEFAULT_LOD));
 if (lod < 1) {
   lod = 1;
@@ -70,11 +77,39 @@ if (lod > 2) {
 }
 const includeColor = !args.has("no-color");
 
-const datasetId = `synth_${makeTimestamp()}`;
+const datasetId = datasetIdOverride ?? `synth_${makeTimestamp()}`;
+const datasetName = args.get("name") ?? `Synth Dataset ${datasetId}`;
+const updateLatest = args.has("update-latest") || datasetIdOverride === undefined;
+const overwrite = args.has("overwrite");
 const datasetDir = path.join(datasetsRoot, datasetId);
 const latestDir = path.join(datasetsRoot, "synth_latest");
-await mkdir(datasetDir, { recursive: true });
-await mkdir(latestDir, { recursive: true });
+
+const ensureCleanDir = async (dir) => {
+  const exists = await stat(dir)
+    .then(() => true)
+    .catch((error) => {
+      if (error && typeof error === "object" && "code" in error) {
+        if (error.code === "ENOENT") {
+          return false;
+        }
+      }
+      throw error;
+    });
+  if (exists) {
+    if (!overwrite) {
+      throw new Error(
+        `Dataset directory already exists (${dir}). Use --overwrite to replace it.`
+      );
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+  await mkdir(dir, { recursive: true });
+};
+
+await ensureCleanDir(datasetDir);
+if (updateLatest) {
+  await mkdir(latestDir, { recursive: true });
+}
 
 const boundsMin = [-100, -100, -100];
 const boundsMax = [100, 100, 100];
@@ -192,6 +227,7 @@ const generateTile = ({
   nodeId,
   parentId,
   level,
+  childMask,
   count,
   regionMin,
   regionMax,
@@ -273,6 +309,7 @@ const generateTile = ({
     nodeId,
     parentId,
     level,
+    childMask,
     pointCount: count,
     bounds,
     quantizedBounds,
@@ -282,13 +319,20 @@ const generateTile = ({
 
 let remainingPoints = pointCount;
 const nodes = [];
-const tileBuffers = [];
 const tileManifests = [];
 const leafManifests = [];
 let globalMin = [Infinity, Infinity, Infinity];
 let globalMax = [-Infinity, -Infinity, -Infinity];
 let byteOffset = 0;
 let nodeIdCounter = 1;
+
+const containerPath = path.join(datasetDir, "tiles.pctc");
+const containerStream = createWriteStream(containerPath);
+const writeToStream = async (stream, chunk) => {
+  if (!stream.write(chunk)) {
+    await once(stream, "drain");
+  }
+};
 
 const leafTileCount = Math.max(1, Math.ceil(pointCount / tileCap));
 const grid = Math.ceil(Math.cbrt(leafTileCount));
@@ -300,22 +344,24 @@ const cellSize = [
 
 let rootNodeId = null;
 if (lod >= 2) {
-  const rootPoints = Math.min(
-    tileCap,
-    Math.max(5_000, Math.floor(pointCount / 50))
-  );
+  const defaultRootPoints = Math.max(5_000, Math.floor(pointCount / 50));
+  const rootPoints =
+    rootPointsOverride !== null
+      ? Math.min(pointCount - 1, rootPointsOverride)
+      : Math.min(tileCap, defaultRootPoints);
   remainingPoints = Math.max(1, pointCount - rootPoints);
   const rootTile = generateTile({
     nodeId: nodeIdCounter,
     parentId: 0,
     level: 0,
+    childMask: 1,
     count: rootPoints,
     regionMin: boundsMin,
     regionMax: boundsMax,
   });
   rootNodeId = nodeIdCounter;
   nodeIdCounter += 1;
-  tileBuffers.push(rootTile.buffer);
+  await writeToStream(containerStream, Buffer.from(rootTile.buffer));
   nodes.push({
     ...rootTile,
     byteOffset,
@@ -363,13 +409,14 @@ for (let i = 0; i < leafCount; i += 1) {
     nodeId: nodeIdCounter,
     parentId: rootNodeId ?? 0,
     level: rootNodeId ? 1 : 0,
+    childMask: 0,
     count,
     regionMin,
     regionMax,
   });
   nodeIdCounter += 1;
 
-  tileBuffers.push(tile.buffer);
+  await writeToStream(containerStream, Buffer.from(tile.buffer));
   const entry = {
     ...tile,
     byteOffset,
@@ -400,66 +447,77 @@ for (let i = 0; i < leafCount; i += 1) {
     Math.max(globalMax[1], tile.bounds[4]),
     Math.max(globalMax[2], tile.bounds[5]),
   ];
+
+  if (i % 10 === 0 || i === leafCount - 1) {
+    const done = Math.min(pointCount, pointCount - remainingLeafPoints);
+    const pct = Math.round((done / pointCount) * 1000) / 10;
+    console.log(`Generated tiles: ${i + 1}/${leafCount} (${pct}%)`);
+  }
 }
 
-const containerPath = path.join(datasetDir, "tiles.pctc");
-await writeFile(
-  containerPath,
-  Buffer.concat(tileBuffers.map((buffer) => Buffer.from(buffer)))
-);
+containerStream.end();
+await finished(containerStream);
 
-const recordCount = nodes.length;
-const maxRecords = Math.floor((64 * 1024 - 20) / 80);
-if (recordCount > maxRecords) {
-  throw new Error(
-    `Hierarchy page too small for ${recordCount} records (max ${maxRecords}).`
-  );
-}
 const pageBytes = 64 * 1024;
-const hierarchyBuffer = new ArrayBuffer(pageBytes);
-const hierarchyView = new DataView(hierarchyBuffer);
-hierarchyView.setUint8(0, "P".charCodeAt(0));
-hierarchyView.setUint8(1, "C".charCodeAt(0));
-hierarchyView.setUint8(2, "H".charCodeAt(0));
-hierarchyView.setUint8(3, "1".charCodeAt(0));
-hierarchyView.setUint16(4, 1, true);
-hierarchyView.setUint16(6, 0, true);
-hierarchyView.setUint32(8, 0, true);
-hierarchyView.setUint32(12, recordCount, true);
-hierarchyView.setUint32(16, 0, true);
-
-nodes.forEach((node, index) => {
-  const offset = 20 + index * 80;
-  hierarchyView.setBigUint64(offset, BigInt(node.nodeId), true);
-  hierarchyView.setBigUint64(offset + 8, BigInt(node.parentId), true);
-  hierarchyView.setUint8(offset + 16, node.level);
-  hierarchyView.setUint8(offset + 17, 0);
-  hierarchyView.setUint16(offset + 18, 0, true);
-  hierarchyView.setUint32(offset + 20, node.pointCount, true);
-  hierarchyView.setInt32(offset + 24, node.quantizedBounds.min[0], true);
-  hierarchyView.setInt32(offset + 28, node.quantizedBounds.min[1], true);
-  hierarchyView.setInt32(offset + 32, node.quantizedBounds.min[2], true);
-  hierarchyView.setInt32(offset + 36, node.quantizedBounds.max[0], true);
-  hierarchyView.setInt32(offset + 40, node.quantizedBounds.max[1], true);
-  hierarchyView.setInt32(offset + 44, node.quantizedBounds.max[2], true);
-  hierarchyView.setUint16(offset + 48, 0, true);
-  hierarchyView.setUint16(offset + 50, 0, true);
-  hierarchyView.setBigUint64(offset + 52, BigInt(node.byteOffset), true);
-  hierarchyView.setUint32(offset + 60, node.byteLength, true);
-  hierarchyView.setUint32(offset + 64, 0, true);
-  hierarchyView.setBigUint64(offset + 68, 0n, true);
-  hierarchyView.setUint32(offset + 76, 0, true);
-});
-
-await writeFile(
-  path.join(datasetDir, "hierarchy.pch"),
-  Buffer.from(hierarchyBuffer)
+const encodedPageBytes = pageBytes === 65536 ? 0 : pageBytes;
+const maxRecordsPerPage = Math.floor((pageBytes - 20) / 80);
+const hierarchyPageCount = Math.max(
+  1,
+  Math.ceil(nodes.length / maxRecordsPerPage)
 );
+const hierarchyPath = path.join(datasetDir, "hierarchy.pch");
+const hierarchyStream = createWriteStream(hierarchyPath);
+
+for (let pageIndex = 0; pageIndex < hierarchyPageCount; pageIndex += 1) {
+  const startIndex = pageIndex * maxRecordsPerPage;
+  const endIndex = Math.min(nodes.length, startIndex + maxRecordsPerPage);
+  const pageRecords = nodes.slice(startIndex, endIndex);
+
+  const hierarchyBuffer = new ArrayBuffer(pageBytes);
+  const hierarchyView = new DataView(hierarchyBuffer);
+  hierarchyView.setUint8(0, "P".charCodeAt(0));
+  hierarchyView.setUint8(1, "C".charCodeAt(0));
+  hierarchyView.setUint8(2, "H".charCodeAt(0));
+  hierarchyView.setUint8(3, "1".charCodeAt(0));
+  hierarchyView.setUint16(4, 1, true);
+  hierarchyView.setUint16(6, encodedPageBytes, true);
+  hierarchyView.setUint32(8, pageIndex, true);
+  hierarchyView.setUint32(12, pageRecords.length, true);
+  hierarchyView.setUint32(16, 0, true);
+
+  pageRecords.forEach((node, index) => {
+    const offset = 20 + index * 80;
+    hierarchyView.setBigUint64(offset, BigInt(node.nodeId), true);
+    hierarchyView.setBigUint64(offset + 8, BigInt(node.parentId), true);
+    hierarchyView.setUint8(offset + 16, node.level);
+    hierarchyView.setUint8(offset + 17, node.childMask);
+    hierarchyView.setUint16(offset + 18, 0, true);
+    hierarchyView.setUint32(offset + 20, node.pointCount, true);
+    hierarchyView.setInt32(offset + 24, node.quantizedBounds.min[0], true);
+    hierarchyView.setInt32(offset + 28, node.quantizedBounds.min[1], true);
+    hierarchyView.setInt32(offset + 32, node.quantizedBounds.min[2], true);
+    hierarchyView.setInt32(offset + 36, node.quantizedBounds.max[0], true);
+    hierarchyView.setInt32(offset + 40, node.quantizedBounds.max[1], true);
+    hierarchyView.setInt32(offset + 44, node.quantizedBounds.max[2], true);
+    hierarchyView.setUint16(offset + 48, 0, true);
+    hierarchyView.setUint16(offset + 50, 0, true);
+    hierarchyView.setBigUint64(offset + 52, BigInt(node.byteOffset), true);
+    hierarchyView.setUint32(offset + 60, node.byteLength, true);
+    hierarchyView.setUint32(offset + 64, 0, true);
+    hierarchyView.setBigUint64(offset + 68, 0n, true);
+    hierarchyView.setUint32(offset + 76, 0, true);
+  });
+
+  await writeToStream(hierarchyStream, Buffer.from(hierarchyBuffer));
+}
+
+hierarchyStream.end();
+await finished(hierarchyStream);
 
 const manifest = {
   schemaVersion: 0.2,
   id: datasetId,
-  name: `Synth Dataset ${datasetId}`,
+  name: datasetName,
   crs: {},
   units: "meters",
   attributes: [
@@ -503,10 +561,12 @@ await writeFile(
   path.join(datasetDir, "dataset.json"),
   JSON.stringify(manifest, null, 2)
 );
-await writeFile(
-  path.join(latestDir, "dataset.json"),
-  JSON.stringify(manifest, null, 2)
-);
+if (updateLatest) {
+  await writeFile(
+    path.join(latestDir, "dataset.json"),
+    JSON.stringify(manifest, null, 2)
+  );
+}
 
 console.log(
   `Generated ${datasetId} with ${pointCount.toLocaleString()} points in ${leafCount} tile(s).`

@@ -45,7 +45,15 @@ export const loadTileBufferFromContainer = async (
     if (import.meta.env.DEV) {
       console.info("[container] tile loaded", { containerUrl, offset, length });
     }
-    return buffer;
+    // `fetchRangeView` may return a view into a shared 16MB range window.
+    // Copy-out so tile caching does not pin the whole window (and to keep cache accounting exact).
+    if (
+      buffer.byteOffset === 0 &&
+      buffer.byteLength === buffer.buffer.byteLength
+    ) {
+      return buffer;
+    }
+    return buffer.slice();
   } catch (error) {
     console.error("[container] tile load failed", {
       containerUrl,

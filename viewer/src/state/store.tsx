@@ -52,10 +52,12 @@ export type RuntimeStats = {
   lastNonEmptyTiles: number;
   zeroTileWarnings: number;
   cpuCacheBytes: number;
+  cacheUniqueBuffers: number;
   pinnedTiles: number;
   pinnedBytes: number;
   inFlightRequests: number;
   queuedRequests: number;
+  schedulerCanceled: number;
   rawBufferRetainedCount: number;
   optionalAttrsDecodedCount: number;
   rawBufferDroppedOnPressureCount: number;
@@ -64,6 +66,9 @@ export type RuntimeStats = {
   lastInteractionMs: number | null;
   isInteracting: boolean;
   targetVisiblePoints: number;
+  hierarchyPagesLoaded: number;
+  hierarchyInFlight: number;
+  hierarchyEof: boolean;
   rangeCache: {
     totalBytes: number;
     totalWindows: number;
@@ -177,10 +182,12 @@ const initialState: AppState = {
     lastNonEmptyTiles: 0,
     zeroTileWarnings: 0,
     cpuCacheBytes: 0,
+    cacheUniqueBuffers: 0,
     pinnedTiles: 0,
     pinnedBytes: 0,
     inFlightRequests: 0,
     queuedRequests: 0,
+    schedulerCanceled: 0,
     rawBufferRetainedCount: 0,
     optionalAttrsDecodedCount: 0,
     rawBufferDroppedOnPressureCount: 0,
@@ -189,6 +196,9 @@ const initialState: AppState = {
     lastInteractionMs: null,
     isInteracting: false,
     targetVisiblePoints: 0,
+    hierarchyPagesLoaded: 0,
+    hierarchyInFlight: 0,
+    hierarchyEof: false,
     rangeCache: {
       totalBytes: 0,
       totalWindows: 0,

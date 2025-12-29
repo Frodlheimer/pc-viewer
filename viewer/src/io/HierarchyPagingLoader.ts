@@ -7,6 +7,7 @@ const DEFAULT_PAGE_BYTES = 64 * 1024;
 const DEFAULT_MAX_PAGES = 8;
 
 const pageCache = new Map<string, Page>();
+const inFlightPages = new Map<string, Promise<Page>>();
 const pageBytesByUrl = new Map<string, number>();
 let maxCachedPages = DEFAULT_MAX_PAGES;
 
@@ -137,7 +138,11 @@ const parseRecords = (
   return records;
 };
 
-const resolvePageBytes = async (url: string, pageBytes?: number) => {
+const resolvePageBytes = async (
+  url: string,
+  pageBytes?: number,
+  signal?: AbortSignal
+) => {
   if (pageBytes && pageBytes > 0) {
     pageBytesByUrl.set(url, pageBytes);
     return pageBytes;
@@ -148,7 +153,7 @@ const resolvePageBytes = async (url: string, pageBytes?: number) => {
     return cached;
   }
 
-  const headerBuffer = await fetchRangeView(url, 0, PAGE_HEADER_BYTES, undefined, {
+  const headerBuffer = await fetchRangeView(url, 0, PAGE_HEADER_BYTES, signal, {
     allowFullFileFallback: false,
   });
   const header = parseHeader(headerBuffer);
@@ -159,6 +164,7 @@ const resolvePageBytes = async (url: string, pageBytes?: number) => {
 export type LoadPageOptions = {
   maxPages?: number;
   pageBytes?: number;
+  signal?: AbortSignal;
 };
 
 export const loadPage = async (
@@ -181,35 +187,51 @@ export const loadPage = async (
     return cached;
   }
 
-  const pageBytes = await resolvePageBytes(url, options?.pageBytes);
-  const start = pageIndex * pageBytes;
-  const buffer = await fetchRangeView(url, start, pageBytes, undefined, {
-    allowFullFileFallback: false,
-  });
-  const header = parseHeader(buffer);
-
-  if (header.pageIndex !== pageIndex) {
-    throw new Error("Hierarchy page index mismatch.");
+  const inflight = inFlightPages.get(cacheKey);
+  if (inflight) {
+    return inflight;
   }
 
-  const records = parseRecords(buffer, header.recordCount);
-  const page: Page = {
-    pageIndex,
-    pageBytes: header.pageBytes,
-    recordCount: header.recordCount,
-    records,
-  };
-
-  if (import.meta.env.DEV) {
-    console.info("[hierarchy] page loaded", {
+  const promise = (async () => {
+    const pageBytes = await resolvePageBytes(
       url,
-      pageIndex: page.pageIndex,
-      recordCount: page.recordCount,
+      options?.pageBytes,
+      options?.signal
+    );
+    const start = pageIndex * pageBytes;
+    const buffer = await fetchRangeView(url, start, pageBytes, options?.signal, {
+      allowFullFileFallback: false,
     });
-  }
+    const header = parseHeader(buffer);
 
-  touchCache(cacheKey, page);
-  return page;
+    if (header.pageIndex !== pageIndex) {
+      throw new Error("Hierarchy page index mismatch.");
+    }
+
+    const records = parseRecords(buffer, header.recordCount);
+    const page: Page = {
+      pageIndex,
+      pageBytes: header.pageBytes,
+      recordCount: header.recordCount,
+      records,
+    };
+
+    if (import.meta.env.DEV) {
+      console.info("[hierarchy] page loaded", {
+        url,
+        pageIndex: page.pageIndex,
+        recordCount: page.recordCount,
+      });
+    }
+
+    touchCache(cacheKey, page);
+    return page;
+  })().finally(() => {
+    inFlightPages.delete(cacheKey);
+  });
+
+  inFlightPages.set(cacheKey, promise);
+  return promise;
 };
 
 export type LoadAllPagesResult = {
@@ -230,9 +252,12 @@ const isRangeEofError = (error: unknown) => {
 
 export const loadAllPages = async (
   url: string,
-  options?: { pageBytes?: number; maxPages?: number }
+  options?: { pageBytes?: number; maxPages?: number; signal?: AbortSignal }
 ): Promise<LoadAllPagesResult> => {
-  const first = await loadPage(url, 0, { pageBytes: options?.pageBytes });
+  const first = await loadPage(url, 0, {
+    pageBytes: options?.pageBytes,
+    signal: options?.signal,
+  });
 
   const pageBytes = first.pageBytes;
   const totalSize = getKnownTotalSize(url);
@@ -247,7 +272,7 @@ export const loadAllPages = async (
 
   for (let i = 1; i < targetPages; i += 1) {
     try {
-      const page = await loadPage(url, i, { pageBytes });
+      const page = await loadPage(url, i, { pageBytes, signal: options?.signal });
       if (page.recordCount === 0) {
         break;
       }

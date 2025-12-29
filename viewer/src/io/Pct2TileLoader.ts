@@ -12,8 +12,23 @@ import {
 const MAGIC = "PCT2";
 const FIXED_HEADER_BYTES = 76;
 const DECODER = new TextDecoder();
+const DEFAULT_LIMITS = {
+  maxPointsPerTile: 10_000_000,
+  maxCompressedAttributeBytes: 256 * 1024 * 1024,
+  maxDecompressedAttributeBytes: 512 * 1024 * 1024,
+} as const;
 
 type BufferSource = ArrayBuffer | Uint8Array;
+
+export type Pct2DecodeLimits = {
+  maxPointsPerTile?: number;
+  maxCompressedAttributeBytes?: number;
+  maxDecompressedAttributeBytes?: number;
+};
+
+export type Pct2DecodeOptions = {
+  limits?: Pct2DecodeLimits;
+};
 
 type AnyTypedArrayConstructor = {
   BYTES_PER_ELEMENT: number;
@@ -61,6 +76,26 @@ const decodeName = (buffer: ArrayBufferLike, offset: number, length: number) =>
 const toNodeId = (value: bigint): bigint | number =>
   value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value;
 
+const resolveLimit = (value: number | undefined, fallback: number) =>
+  typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : fallback;
+
+const resolveLimits = (limits: Pct2DecodeLimits | undefined) => ({
+  maxPointsPerTile: resolveLimit(
+    limits?.maxPointsPerTile,
+    DEFAULT_LIMITS.maxPointsPerTile
+  ),
+  maxCompressedAttributeBytes: resolveLimit(
+    limits?.maxCompressedAttributeBytes,
+    DEFAULT_LIMITS.maxCompressedAttributeBytes
+  ),
+  maxDecompressedAttributeBytes: resolveLimit(
+    limits?.maxDecompressedAttributeBytes,
+    DEFAULT_LIMITS.maxDecompressedAttributeBytes
+  ),
+});
+
 const decodePositions = (
   attribute: TypedArray,
   pointCount: number,
@@ -105,12 +140,14 @@ type MandatoryDecodeResult = {
 };
 
 export const parsePct2HeaderAndDirectory = (
-  buffer: BufferSource
+  buffer: BufferSource,
+  options?: Pct2DecodeOptions
 ): { header: Pct2Header; directory: Pct2Directory } => {
   if (buffer.byteLength < FIXED_HEADER_BYTES) {
     throw new Error("PCT2 header truncated.");
   }
 
+  const limits = resolveLimits(options?.limits);
   const sourceBuffer = getSourceBuffer(buffer);
   const sourceOffset = getSourceOffset(buffer);
   const view = new DataView(sourceBuffer, sourceOffset, buffer.byteLength);
@@ -131,6 +168,11 @@ export const parsePct2HeaderAndDirectory = (
 
   const nodeId = toNodeId(view.getBigUint64(8, true));
   const pointCount = view.getUint32(16, true);
+  if (pointCount > limits.maxPointsPerTile) {
+    throw new Error(
+      `PCT2 tile exceeds maxPointsPerTile (${pointCount} > ${limits.maxPointsPerTile}).`
+    );
+  }
   const flags = view.getUint32(20, true);
   const origin = readVec3(view, 24);
   const scale = readVec3(view, 48);
@@ -233,6 +275,16 @@ export const parsePct2HeaderAndDirectory = (
 
     const elementCount = pointCount * components;
     const expectedByteLength = elementCount * ArrayType.BYTES_PER_ELEMENT;
+    if (expectedByteLength > limits.maxDecompressedAttributeBytes) {
+      throw new Error(
+        `PCT2 attribute exceeds maxDecompressedAttributeBytes (${name}, ${expectedByteLength} > ${limits.maxDecompressedAttributeBytes}).`
+      );
+    }
+    if (byteLength > limits.maxCompressedAttributeBytes) {
+      throw new Error(
+        `PCT2 attribute exceeds maxCompressedAttributeBytes (${name}, ${byteLength} > ${limits.maxCompressedAttributeBytes}).`
+      );
+    }
     if (codec === CodecEnum.None && byteLength < expectedByteLength) {
       throw new Error("PCT2 attribute payload truncated.");
     }
@@ -268,10 +320,12 @@ export const parsePct2HeaderAndDirectory = (
 export const decodePct2Attributes = (
   buffer: BufferSource,
   directory: Pct2Directory,
-  attrNames: string[]
+  attrNames: string[],
+  options?: Pct2DecodeOptions
 ): Record<string, TypedArray> => {
   const sourceBuffer = getSourceBuffer(buffer);
   const sourceOffset = getSourceOffset(buffer);
+  const limits = resolveLimits(options?.limits);
   const attributes: Record<string, TypedArray> = {};
   const uniqueNames = Array.from(new Set(attrNames));
   for (const name of uniqueNames) {
@@ -285,6 +339,16 @@ export const decodePct2Attributes = (
     }
     const elementCount = directory.header.pointCount * entry.components;
     const expectedByteLength = elementCount * ArrayType.BYTES_PER_ELEMENT;
+    if (expectedByteLength > limits.maxDecompressedAttributeBytes) {
+      throw new Error(
+        `PCT2 attribute exceeds maxDecompressedAttributeBytes (${name}, ${expectedByteLength} > ${limits.maxDecompressedAttributeBytes}).`
+      );
+    }
+    if (entry.byteLength > limits.maxCompressedAttributeBytes) {
+      throw new Error(
+        `PCT2 attribute exceeds maxCompressedAttributeBytes (${name}, ${entry.byteLength} > ${limits.maxCompressedAttributeBytes}).`
+      );
+    }
     if (entry.payloadOffset + entry.byteLength > buffer.byteLength) {
       throw new Error("PCT2 attribute block out of range.");
     }
@@ -314,6 +378,11 @@ export const decodePct2Attributes = (
         entry.byteLength
       );
       const decompressed = decompress(compressed);
+      if (decompressed.byteLength > limits.maxDecompressedAttributeBytes) {
+        throw new Error(
+          `PCT2 zstd output exceeds maxDecompressedAttributeBytes (${name}, ${decompressed.byteLength} > ${limits.maxDecompressedAttributeBytes}).`
+        );
+      }
       if (decompressed.byteLength < expectedByteLength) {
         throw new Error(`PCT2 zstd payload truncated for ${name}.`);
       }
@@ -339,7 +408,8 @@ export const decodePct2Attributes = (
 export const decodePct2Mandatory = (
   buffer: BufferSource,
   directory: Pct2Directory,
-  options: MandatoryDecodeOptions
+  options: MandatoryDecodeOptions,
+  decodeOptions?: Pct2DecodeOptions
 ): MandatoryDecodeResult => {
   const positionName = options.positionName;
   const colorName = options.colorName;
@@ -350,7 +420,7 @@ export const decodePct2Mandatory = (
   } else if (colorName && !allowMissingColor) {
     throw new Error(`PCT2 tile missing color attribute (${colorName}).`);
   }
-  const attributes = decodePct2Attributes(buffer, directory, attrNames);
+  const attributes = decodePct2Attributes(buffer, directory, attrNames, decodeOptions);
   const rawPosition = attributes[positionName];
   if (!rawPosition) {
     throw new Error(`PCT2 tile missing position attribute (${positionName}).`);
@@ -380,10 +450,13 @@ export const decodePct2Mandatory = (
   };
 };
 
-export const parsePct2TileEager = (buffer: BufferSource): ParsedTile2 => {
-  const { header, directory } = parsePct2HeaderAndDirectory(buffer);
+export const parsePct2TileEager = (
+  buffer: BufferSource,
+  options?: Pct2DecodeOptions
+): ParsedTile2 => {
+  const { header, directory } = parsePct2HeaderAndDirectory(buffer, options);
   const attrNames = directory.attributes.map((entry) => entry.name);
-  const attributes = decodePct2Attributes(buffer, directory, attrNames);
+  const attributes = decodePct2Attributes(buffer, directory, attrNames, options);
   const position = attributes.position;
   if (position) {
     attributes.position = decodePositions(
@@ -401,13 +474,21 @@ export const parsePct2TileEager = (buffer: BufferSource): ParsedTile2 => {
   };
 };
 
-export const parsePct2Tile = (buffer: BufferSource): ParsedTile2 => {
-  const { header, directory } = parsePct2HeaderAndDirectory(buffer);
-  const mandatory = decodePct2Mandatory(buffer, directory, {
-    positionName: "position",
-    colorName: "rgb",
-    allowMissingColor: true,
-  });
+export const parsePct2Tile = (
+  buffer: BufferSource,
+  options?: Pct2DecodeOptions
+): ParsedTile2 => {
+  const { header, directory } = parsePct2HeaderAndDirectory(buffer, options);
+  const mandatory = decodePct2Mandatory(
+    buffer,
+    directory,
+    {
+      positionName: "position",
+      colorName: "rgb",
+      allowMissingColor: true,
+    },
+    options
+  );
   const attributes: Record<string, TypedArray> = {
     [mandatory.positionName]: mandatory.positions,
   };

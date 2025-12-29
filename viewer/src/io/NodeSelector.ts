@@ -18,6 +18,10 @@ export type NodeSelectionInput = {
   width?: number;
   height?: number;
   nodes: NodeRecord[];
+  hierarchyIndex?: {
+    childrenByParent: Map<string, NodeRecord[]>;
+    roots: NodeRecord[];
+  };
   boundsQuantization: BoundsQuantization;
   runtimeBudgets: RuntimeBudgets;
   previousSelection?: Set<string>;
@@ -28,6 +32,8 @@ export type NodeSelectionDiagnostics = {
   visiblePoints: number;
   selectedCount: number;
   selectedLevels: Record<number, number>;
+  missingChildrenCount: number;
+  missingChildrenParents: string[];
   reasonCounts: {
     frustumCulled: number;
     refined: number;
@@ -60,6 +66,7 @@ type NodeInfo = {
   pixelRadius: number;
   distance: number;
   visible: boolean;
+  declaredHasChildren: boolean;
   children: NodeRecord[];
 };
 
@@ -317,24 +324,36 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
   const maxNodes = deriveMaxNodes(input.runtimeBudgets);
   const targetPoints = input.runtimeBudgets.targetVisiblePoints;
 
-  const nodeMap = new Map<string, NodeRecord>();
-  const childrenByParent = new Map<string, NodeRecord[]>();
-  for (const node of input.nodes) {
-    nodeMap.set(keyFromNodeId(node.nodeId), node);
-  }
-  for (const node of input.nodes) {
-    const parentKey = keyFromNodeId(node.parentId);
-    if (nodeMap.has(parentKey) && parentKey !== keyFromNodeId(node.nodeId)) {
-      const list = childrenByParent.get(parentKey) ?? [];
-      list.push(node);
-      childrenByParent.set(parentKey, list);
+  let derivedChildrenByParent = input.hierarchyIndex?.childrenByParent;
+  let derivedRoots = input.hierarchyIndex?.roots;
+
+  if (!derivedChildrenByParent || !derivedRoots) {
+    const nodeMap = new Map<string, NodeRecord>();
+    derivedChildrenByParent = new Map<string, NodeRecord[]>();
+    derivedRoots = [];
+    for (const node of input.nodes) {
+      nodeMap.set(keyFromNodeId(node.nodeId), node);
     }
+    for (const node of input.nodes) {
+      const parentKey = keyFromNodeId(node.parentId);
+      const nodeKey = keyFromNodeId(node.nodeId);
+      if (nodeMap.has(parentKey) && parentKey !== nodeKey) {
+        const list = derivedChildrenByParent.get(parentKey) ?? [];
+        list.push(node);
+        derivedChildrenByParent.set(parentKey, list);
+      }
+    }
+    input.nodes.forEach((node) => {
+      const nodeKey = keyFromNodeId(node.nodeId);
+      const parentKey = keyFromNodeId(node.parentId);
+      if (!nodeMap.has(parentKey) || parentKey === nodeKey) {
+        derivedRoots!.push(node);
+      }
+    });
   }
 
-  const roots = input.nodes.filter((node) => {
-    const parentKey = keyFromNodeId(node.parentId);
-    return !nodeMap.has(parentKey) || parentKey === keyFromNodeId(node.nodeId);
-  });
+  const childrenByParent = derivedChildrenByParent!;
+  const roots = derivedRoots!;
 
   const infoCache = new Map<string, NodeInfo>();
   const getInfo = (node: NodeRecord): NodeInfo => {
@@ -362,6 +381,7 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
       pixelRadius: Number.isFinite(pixelRadius) ? pixelRadius : 0,
       distance,
       visible,
+      declaredHasChildren: node.childMask !== 0,
       children,
     };
     infoCache.set(key, info);
@@ -381,6 +401,7 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
   const selected: SelectedNode[] = [];
   const selectedKeys = new Set<string>();
   const selectedLevels: Record<number, number> = {};
+  const missingChildrenParents = new Set<string>();
   const reasonCounts = {
     frustumCulled: 0,
     refined: 0,
@@ -410,8 +431,17 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
     const key = keyFromNodeId(node.nodeId);
     const children = info.children;
     const hasChildren = children.length > 0;
+    const declaredHasChildren = info.declaredHasChildren;
     let shouldRefine = false;
     let keptPrevious = false;
+
+    if (
+      declaredHasChildren &&
+      !hasChildren &&
+      info.pixelRadius > refineThreshold
+    ) {
+      missingChildrenParents.add(key);
+    }
 
     if (hasChildren && info.pixelRadius > refineThreshold) {
       shouldRefine = true;
@@ -483,6 +513,8 @@ export const selectNodes = (input: NodeSelectionInput): NodeSelectionResult => {
       visiblePoints,
       selectedCount: selected.length,
       selectedLevels,
+      missingChildrenCount: missingChildrenParents.size,
+      missingChildrenParents: Array.from(missingChildrenParents),
       reasonCounts,
     },
   };

@@ -16,7 +16,7 @@ import {
 import { createPointCloudLayer } from "../layers/PointCloudLayerFactory";
 import { createPatchLayers } from "../layers/PatchLayersFactory";
 import { getRuntimeBudgets } from "../config/budgets";
-import { loadPage } from "../io/HierarchyPagingLoader";
+import { createHierarchyPager, type HierarchyPager, type HierarchyPagerUpdate } from "../io/HierarchyPager";
 import { loadManifest } from "../io/ManifestLoader";
 import { selectNodes, type SelectedNode } from "../io/NodeSelector";
 import { getRangeWindowStats } from "../io/RangeFetch";
@@ -26,7 +26,7 @@ import { loadRenderData } from "../io/TileManager";
 import { useAppStore } from "../state/store";
 import type { RuntimeStats, SelectionItem } from "../state/store";
 import type { BoundsQuantization, DatasetManifest } from "../types/Dataset";
-import type { NodeRecord, Page } from "../types/Hierarchy";
+import type { NodeRecord } from "../types/Hierarchy";
 import { getDatasetById } from "../types/Dataset";
 import type { Vec3 } from "../types/Point";
 import type { RenderData, TileRenderData } from "../types/Tile";
@@ -76,6 +76,7 @@ const buildRenderData = (
 type HierarchyIndex = {
   nodeById: Map<string, NodeRecord>;
   childrenByParent: Map<string, NodeRecord[]>;
+  roots: NodeRecord[];
 };
 
 const buildHierarchyIndex = (nodes: NodeRecord[]): HierarchyIndex => {
@@ -90,7 +91,11 @@ const buildHierarchyIndex = (nodes: NodeRecord[]): HierarchyIndex => {
       childrenByParent.set(parentKey, list);
     }
   });
-  return { nodeById, childrenByParent };
+  const roots = nodes.filter((node) => {
+    const parentKey = keyFromNodeId(node.parentId);
+    return !nodeById.has(parentKey) || parentKey === keyFromNodeId(node.nodeId);
+  });
+  return { nodeById, childrenByParent, roots };
 };
 
 const decodeQuantizedBounds = (
@@ -177,14 +182,16 @@ export const Viewer = () => {
   } | null>(null);
   const [hierarchyState, setHierarchyState] = useState<{
     datasetId: string;
-    page: Page;
+    update: HierarchyPagerUpdate;
   } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const deckRef = useRef<DeckGLRef | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const tileServiceRef = useRef<TileService>(new TileService());
   const schedulerRef = useRef<LoadScheduler | null>(null);
+  const hierarchyPagerRef = useRef<HierarchyPager | null>(null);
   const hierarchyIndexRef = useRef<HierarchyIndex | null>(null);
+  const hierarchyLoadInFlightRef = useRef(false);
   const manifestRef = useRef<DatasetManifest | null>(null);
   const desiredEntriesRef = useRef<SelectedNode[]>([]);
   const desiredKeysRef = useRef<Set<string>>(new Set());
@@ -220,8 +227,8 @@ export const Viewer = () => {
     manifestState?.datasetId === activeDatasetId
       ? manifestState.manifest
       : null;
-  const hierarchyPage =
-    hierarchyState?.datasetId === activeDatasetId ? hierarchyState.page : null;
+  const hierarchy =
+    hierarchyState?.datasetId === activeDatasetId ? hierarchyState.update : null;
 
   useEffect(() => {
     const element = containerRef.current;
@@ -466,10 +473,10 @@ export const Viewer = () => {
   );
 
   useEffect(() => {
-    hierarchyIndexRef.current = hierarchyPage
-      ? buildHierarchyIndex(hierarchyPage.records)
+    hierarchyIndexRef.current = hierarchy
+      ? buildHierarchyIndex(hierarchy.records)
       : null;
-  }, [hierarchyPage]);
+  }, [hierarchy]);
 
   const updateRenderDataFromCache = useCallback(() => {
     const activeManifest = manifestRef.current;
@@ -688,6 +695,7 @@ export const Viewer = () => {
       const rangeStats = getRangeWindowStats();
       const retainedSummary = getRetainedSummary();
       const renderStats = getRenderStats();
+      const hierarchySnapshot = hierarchyPagerRef.current?.snapshot();
       dispatch({
         type: "set-runtime-stats",
         stats: {
@@ -697,6 +705,7 @@ export const Viewer = () => {
           lastNonEmptyTiles: renderStats.lastNonEmptyTiles,
           zeroTileWarnings: renderStats.zeroTileWarnings,
           cpuCacheBytes: cacheStats.bytes,
+          cacheUniqueBuffers: cacheStats.uniqueBuffers,
           pinnedTiles: cacheStats.pinnedItems,
           pinnedBytes: cacheStats.pinnedBytes,
           rawBufferRetainedCount: cacheStats.rawBufferRetainedCount,
@@ -708,6 +717,10 @@ export const Viewer = () => {
           retainedPoints: retainedSummary.retainedPoints,
           inFlightRequests: schedulerStats?.inFlight ?? cacheStats.inFlight,
           queuedRequests: schedulerStats?.queued ?? 0,
+          schedulerCanceled: schedulerStats?.canceled ?? 0,
+          hierarchyPagesLoaded: hierarchySnapshot?.pagesLoaded ?? 0,
+          hierarchyInFlight: hierarchySnapshot?.inFlight ?? 0,
+          hierarchyEof: hierarchySnapshot?.eof ?? false,
           rangeCache: rangeStats,
           lastInteractionMs: getLastInteractionMs(),
           isInteracting,
@@ -798,7 +811,7 @@ export const Viewer = () => {
   }, [isInteracting, effectiveTargetVisiblePoints, updateRuntimeStats]);
 
   useEffect(() => {
-    if (!manifest?.hierarchyUrl || !hierarchyPage) {
+    if (!manifest?.hierarchyUrl || !hierarchy) {
       return;
     }
     if (isInteracting) {
@@ -812,7 +825,7 @@ export const Viewer = () => {
   }, [
     isInteracting,
     manifest,
-    hierarchyPage,
+    hierarchy,
     syncRetainedNodes,
     updateRenderDataFromCache,
     updateRuntimeStats,
@@ -884,12 +897,16 @@ export const Viewer = () => {
 
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
     const dataset = getDatasetById(activeDatasetId);
     datasetLoadIdRef.current += 1;
     const loadId = datasetLoadIdRef.current;
     const initialTargetVisiblePoints = budgetsRef.current.targetVisiblePoints;
     tileServiceRef.current.clear();
     schedulerRef.current?.clear();
+    hierarchyPagerRef.current = null;
+    hierarchyLoadInFlightRef.current = false;
+    window.setTimeout(() => setHierarchyState(null), 0);
     desiredEntriesRef.current = [];
     desiredKeysRef.current = new Set();
     retainedNodesRef.current = new Map();
@@ -925,10 +942,12 @@ export const Viewer = () => {
         lastNonEmptyTiles: 0,
         zeroTileWarnings: 0,
         cpuCacheBytes: 0,
+        cacheUniqueBuffers: 0,
         pinnedTiles: 0,
         pinnedBytes: 0,
         inFlightRequests: 0,
         queuedRequests: 0,
+        schedulerCanceled: 0,
         rawBufferRetainedCount: 0,
         optionalAttrsDecodedCount: 0,
         rawBufferDroppedOnPressureCount: 0,
@@ -937,6 +956,9 @@ export const Viewer = () => {
         lastInteractionMs: null,
         isInteracting: false,
         targetVisiblePoints: initialTargetVisiblePoints,
+        hierarchyPagesLoaded: 0,
+        hierarchyInFlight: 0,
+        hierarchyEof: false,
         rangeCache: getRangeWindowStats(),
       },
     });
@@ -964,11 +986,15 @@ export const Viewer = () => {
           bounds: loadedManifest.bounds,
         });
         if (loadedManifest.hierarchyUrl) {
-          const page = await loadPage(loadedManifest.hierarchyUrl, 0, {
+          const pager = createHierarchyPager({
+            url: loadedManifest.hierarchyUrl,
             pageBytes: loadedManifest.hierarchyPageBytes,
+            signal: abort.signal,
           });
+          hierarchyPagerRef.current = pager;
+          const update = await pager.init();
           if (cancelled || datasetLoadIdRef.current !== loadId) return;
-          setHierarchyState({ datasetId: activeDatasetId, page });
+          setHierarchyState({ datasetId: activeDatasetId, update });
           return;
         }
 
@@ -997,10 +1023,12 @@ export const Viewer = () => {
                 (tile.colors?.byteLength ?? 0),
               0
             ),
+            cacheUniqueBuffers: 0,
             pinnedTiles: 0,
             pinnedBytes: 0,
             inFlightRequests: 0,
             queuedRequests: 0,
+            schedulerCanceled: 0,
             rawBufferRetainedCount: 0,
             optionalAttrsDecodedCount: 0,
             rawBufferDroppedOnPressureCount: 0,
@@ -1017,6 +1045,9 @@ export const Viewer = () => {
                   ),
             isInteracting: isInteractingRef.current,
             targetVisiblePoints: initialTargetVisiblePoints,
+            hierarchyPagesLoaded: 0,
+            hierarchyInFlight: 0,
+            hierarchyEof: false,
             rangeCache: getRangeWindowStats(),
           },
         });
@@ -1030,11 +1061,12 @@ export const Viewer = () => {
 
     return () => {
       cancelled = true;
+      abort.abort();
     };
   }, [activeDatasetId, dispatch]);
 
   useEffect(() => {
-    if (!manifest?.hierarchyUrl || !hierarchyPage) {
+    if (!manifest?.hierarchyUrl || !hierarchy) {
       return;
     }
 
@@ -1044,11 +1076,13 @@ export const Viewer = () => {
 
     selectionTimerRef.current = window.setTimeout(() => {
       const selectionStart = performance.now();
+      const hierarchyIndex = hierarchyIndexRef.current ?? undefined;
       const selectionResult = selectNodes({
         viewport: orbitViewport,
         width: viewportSize.width,
         height: viewportSize.height,
-        nodes: hierarchyPage.records,
+        nodes: hierarchy.records,
+        hierarchyIndex,
         boundsQuantization: manifest.boundsQuantization,
         runtimeBudgets: selectionBudgets,
         previousSelection: previousSelectionRef.current,
@@ -1077,8 +1111,33 @@ export const Viewer = () => {
           zoom: viewState.zoom,
           selected: desiredEntries.length,
           levels: selectionResult.diagnostics.selectedLevels,
+          missingChildren: selectionResult.diagnostics.missingChildrenCount,
           reasons: selectionResult.diagnostics.reasonCounts,
         });
+      }
+
+      const pager = hierarchyPagerRef.current;
+      if (
+        pager &&
+        selectionResult.diagnostics.missingChildrenCount > 0 &&
+        !pager.snapshot().eof &&
+        !hierarchyLoadInFlightRef.current
+      ) {
+        hierarchyLoadInFlightRef.current = true;
+        pager
+          .loadNextPages(2)
+          .then((update) => {
+            setHierarchyState({ datasetId: activeDatasetId, update });
+          })
+          .catch((error: unknown) => {
+            if (error instanceof Error && error.name === "AbortError") {
+              return;
+            }
+            console.error("[hierarchy] page load failed", { error });
+          })
+          .finally(() => {
+            hierarchyLoadInFlightRef.current = false;
+          });
       }
 
       const scheduler = schedulerRef.current;
@@ -1113,8 +1172,9 @@ export const Viewer = () => {
       }
     };
   }, [
+    activeDatasetId,
     manifest,
-    hierarchyPage,
+    hierarchy,
     viewState,
     viewportSize,
     orbitViewport,

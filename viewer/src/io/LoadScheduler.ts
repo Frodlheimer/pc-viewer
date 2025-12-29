@@ -114,6 +114,7 @@ export type LoadSchedulerStats = {
   desiredQueued: number;
   prefetchQueued: number;
   inFlight: number;
+  canceled: number;
 };
 
 export type LoadSchedulerOptions = {
@@ -138,6 +139,7 @@ export class LoadScheduler {
   private desiredQueue = new PriorityQueue(comparePriority);
   private prefetchQueue = new PriorityQueue(comparePriority);
   private inFlight = new Set<string>();
+  private canceled = 0;
 
   constructor(options: LoadSchedulerOptions) {
     this.tileService = options.tileService;
@@ -204,11 +206,13 @@ export class LoadScheduler {
     const allowedKeys = new Set<string>();
     this.desiredKeys.forEach((key) => allowedKeys.add(key));
     this.prefetchKeys.forEach((key) => allowedKeys.add(key));
-    this.inFlight.forEach((key) => {
-      if (!allowedKeys.has(key)) {
-        this.tileService.cancelTile(key);
-        this.inFlight.delete(key);
-      }
+    const toCancel = Array.from(this.inFlight).filter(
+      (key) => !allowedKeys.has(key)
+    );
+    toCancel.forEach((key) => {
+      this.tileService.cancelTile(key);
+      this.inFlight.delete(key);
+      this.canceled += 1;
     });
   }
 
@@ -261,6 +265,7 @@ export class LoadScheduler {
       desiredQueued: this.desiredQueue.size,
       prefetchQueued: this.prefetchQueue.size,
       inFlight: this.inFlight.size,
+      canceled: this.canceled,
     };
   }
 
@@ -271,5 +276,6 @@ export class LoadScheduler {
     this.prefetchQueue.clear();
     this.inFlight.forEach((key) => this.tileService.cancelTile(key));
     this.inFlight.clear();
+    this.canceled = 0;
   }
 }

@@ -74,6 +74,21 @@ describe("Pct2TileLoader (zstd)", () => {
     expect(positions.buffer.byteLength).toBe(12);
   });
 
+  it("enforces maxDecompressedAttributeBytes for zstd output", async () => {
+    const oversized = new Uint8Array(64);
+
+    vi.doMock("fzstd", () => ({
+      decompress: () => oversized,
+    }));
+
+    const { parsePct2Tile } = await import("./Pct2TileLoader");
+    expect(() =>
+      parsePct2Tile(buildPct2ZstdBuffer(), {
+        limits: { maxDecompressedAttributeBytes: 16 },
+      })
+    ).toThrow(/maxDecompressedAttributeBytes/i);
+  });
+
   it("throws a clear error when the decompressed payload is truncated", async () => {
     vi.doMock("fzstd", () => ({
       decompress: () => new Uint8Array(8),

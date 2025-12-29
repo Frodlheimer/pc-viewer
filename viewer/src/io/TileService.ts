@@ -65,7 +65,7 @@ const dropEntryRawBuffer = (entry: CachedTileEntry) => {
   entry.rawBuffer = undefined;
 };
 
-const estimateTileBytes = (entry: CachedTileEntry) => {
+const getEntryBuffers = (entry: CachedTileEntry) => {
   const buffers = new Set<ArrayBufferLike>();
   const addBuffer = (buffer: ArrayBufferLike | undefined) => {
     if (!buffer || buffers.has(buffer)) {
@@ -83,11 +83,7 @@ const estimateTileBytes = (entry: CachedTileEntry) => {
   entry.decodedOptional.forEach((array) => {
     addBuffer(array.buffer);
   });
-  let bytes = 0;
-  buffers.forEach((buffer) => {
-    bytes += buffer.byteLength;
-  });
-  return bytes;
+  return Array.from(buffers);
 };
 
 const isAbortError = (error: unknown) =>
@@ -140,7 +136,7 @@ export class TileService {
         this.lastBudgetBytes = budgetBytes;
         const storeKey = entry.key;
         this.applyRawBufferPolicy(entry);
-        this.cache.set(storeKey, entry, estimateTileBytes(entry));
+        this.cache.set(storeKey, entry, getEntryBuffers(entry));
         if (this.pinnedKeys.has(storeKey)) {
           this.cache.pin(storeKey);
           this.applyPinnedPolicy(storeKey);
@@ -256,7 +252,7 @@ export class TileService {
     });
     entry.lastOptionalAccess = Date.now();
     this.applyRawBufferPolicy(entry);
-    this.cache.set(key, entry, estimateTileBytes(entry));
+    this.cache.set(key, entry, getEntryBuffers(entry));
     if (this.lastBudgetBytes > 0) {
       this.dropRawBuffersToFitBudget(this.lastBudgetBytes);
       this.cache.evictToBudget(this.lastBudgetBytes);
@@ -275,6 +271,7 @@ export class TileService {
   stats(): {
     items: number;
     bytes: number;
+    uniqueBuffers: number;
     pinnedItems: number;
     pinnedBytes: number;
     inFlight: number;
@@ -330,7 +327,7 @@ export class TileService {
       }
       const before = this.cache.stats().bytes;
       dropEntryRawBuffer(entry);
-      this.cache.set(candidate.key, entry, estimateTileBytes(entry));
+      this.cache.set(candidate.key, entry, getEntryBuffers(entry));
       const after = this.cache.stats().bytes;
       const droppedBytes = Math.max(0, before - after);
       if (droppedBytes > 0) {
@@ -358,7 +355,7 @@ export class TileService {
       return;
     }
     this.applyRawBufferPolicy(entry);
-    this.cache.set(key, entry, estimateTileBytes(entry));
+    this.cache.set(key, entry, getEntryBuffers(entry));
   }
 
   private dropAllRawBuffers() {
@@ -367,7 +364,7 @@ export class TileService {
         return;
       }
       dropEntryRawBuffer(entry);
-      this.cache.set(entry.key, entry, estimateTileBytes(entry));
+      this.cache.set(entry.key, entry, getEntryBuffers(entry));
     });
   }
 

@@ -13,7 +13,10 @@ npm run dev
 npm run generate:demo-tiles
 npm run generate:synth
 npm run generate:test5m
+npm run generate:test300m
 ```
+
+Note: `generate:test300m` creates a multi-GB dataset under `viewer/public/datasets/test300m/`.
 
 ## Tests & build
 ```bash

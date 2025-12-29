@@ -65,4 +65,20 @@ describe("Pct2TileLoader", () => {
     expect(positions.buffer).toBe(buffer);
     expect(Array.from(positions)).toEqual([1, 2, 3]);
   });
+
+  it("fails cleanly when attribute offsets exceed the buffer", () => {
+    const buffer = buildPct2Buffer();
+    const view = new DataView(buffer);
+    view.setUint32(89, 1000, true);
+    expect(() => parsePct2Tile(buffer)).toThrow(/attribute block out of range/i);
+  });
+
+  it("enforces maxPointsPerTile limits", () => {
+    const buffer = buildPct2Buffer();
+    const view = new DataView(buffer);
+    view.setUint32(16, 2, true);
+    expect(() =>
+      parsePct2Tile(buffer, { limits: { maxPointsPerTile: 1 } })
+    ).toThrow(/maxPointsPerTile/i);
+  });
 });

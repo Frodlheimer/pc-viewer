@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Large generated datasets (local only)
+public/datasets/test300m/
